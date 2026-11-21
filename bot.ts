@@ -42,7 +42,7 @@ const K = {
   // Preferred fight distances. Real-map arena sim (30 runs, kills before death): gun 140 m 2.00 vs
   // 90 m 1.63; laser 180 m 4.13 vs 140 m 3.60 vs 90 m 3.25; mortar 120-160 m ~3.3. House bots
   // fight at ~55 m and miss more with range, while our led shots stay accurate.
-  want: knob("WANT", 140), // preferred fight distance with the gun alone, m
+  want: knob("WANT", 100), // preferred fight distance with the gun alone, m
   band: knob("BAND", 30), // no radial movement within want +- band
   wantLaser: knob("WANT_LASER", 180), // ... when holding a laser (hitscan, 280 m)
   wantLightning: knob("WANT_LIGHTNING", 140), // ... with lightning (45 m reach): fight like the gun; closing in loses in both sims
@@ -52,18 +52,18 @@ const K = {
   flipMin: knob("FLIP_MIN", 0.8), // strafe direction lasts flipMin + rand * flipRand s
   flipRand: knob("FLIP_RAND", 1.4),
   flipOnHit: knob("FLIP_ON_HIT", 1), // reverse strafe when hit
-  retreatHp: knob("RETREAT_HP", 0.3), // retreat below this HP fraction if the target is not weaker
-  retreatN: knob("RETREAT_N", 3), // retreat when this many enemies are within 120 m
+  retreatHp: knob("RETREAT_HP", 0), // retreat below this HP fraction if the target is not weaker
+  retreatN: knob("RETREAT_N", 99), // retreat when this many enemies are within 120 m
   fightPos: knob("FIGHT_POS", 0), // with 2+ enemies around, pick spots that keep our target in sight and hide us from the others
   fightPosEvery: knob("FIGHT_POS_EVERY", 5), // decisions between spot choices
   // Farming power cubes (+4% max HP and damage each, up to 10; upgrade offers at 1, 3, 6, 10).
   // Arena sim with a cube head start: 0 cubes 2.85 kills, 6 cubes 3.55, 10 cubes 4.95.
   farm: knob("FARM", 1), // in free time, go and shoot drones and ground crates for cubes (arena: 2.17 -> 2.73 kills, cubes at death 3.0 -> 6.1)
-  farmUntil: knob("FARM_UNTIL", 420), // match time after which we stop farming, s
-  farmRange: knob("FARM_RANGE", 250), // how far we walk for a drone or crate, m
-  farmMinHp: knob("FARM_MIN_HP", 0.6), // arena (4 seeds x 30): 0.85 -> 2.72 kills vs 0.70 -> 2.52 // do not farm below this HP fraction
+  farmUntil: knob("FARM_UNTIL", 300), // match time after which we stop farming, s
+  farmRange: knob("FARM_RANGE", 150), // how far we walk for a drone or crate, m
+  farmMinHp: knob("FARM_MIN_HP", 0.85), // arena (4 seeds x 30): 0.85 -> 2.72 kills vs 0.70 -> 2.52 // do not farm below this HP fraction
   npcStandoff: knob("NPC_STANDOFF", 70), // shoot drones from here (their aggro range is 45 m)
-  cubeRange: knob("CUBE_RANGE", 200), // walk this far for a visible cube
+  cubeRange: knob("CUBE_RANGE", 150), // walk this far for a visible cube
   shootNpc: knob("SHOOT_NPC", 1), // shoot drones we happen to pass (when not farming)
   shootCrate: knob("SHOOT_CRATE", 1), // shoot crates we happen to pass (when not farming)
   grabInFight: knob("GRAB_IN_FIGHT", 80), // unarmed in a fight: move to a known laser/mortar within this many m (0 = off). Arena: armed 63% -> 92% of runs, kills 2.21 -> 2.60
@@ -93,7 +93,7 @@ const K = {
   recoverHp: knob("RECOVER_HP", 0), // between fights: below this HP fraction, stay out of sight to regen (0 = off)
   recoverTo: knob("RECOVER_TO", 0.85), // ... until back above this
   recoverRange: knob("RECOVER_RANGE", 100), // ... unless an enemy is closer than this (then fight)
-  boostFight: knob("BOOST_FIGHT", 40),
+  boostFight: knob("BOOST_FIGHT", 20),
   // DIAGNOSTIC: never fire, always back away from threats. Its score = points earned without kills.
   pacifist: knob("PACIFIST", 0),
   maxClimb: knob("MAX_CLIMB", 45), // highest roof (m above the ground) we climb for a weapon; 0 = never // boost while strafing when energy is above this (0 = never); duel sim: -30% damage taken

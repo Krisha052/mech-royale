@@ -40,7 +40,7 @@ const knob = (name: string, dflt: number) => {
 const K = {
   want: knob("WANT", 90), // preferred fight distance with the gun alone, m
   band: knob("BAND", 30), // no radial movement within want +- band
-  wantLaser: knob("WANT_LASER", 90), // ... when holding a laser (hitscan, 280 m)
+  wantLaser: knob("WANT_LASER", 140), // ... when holding a laser (hitscan, 280 m). Gauntlet sim: 140 m beats 90 m vs leading (6.75 vs 5.19) and approaching hunters (3.75 vs 3.00)
   wantLightning: knob("WANT_LIGHTNING", 90), // ... with lightning (45 m reach). Duel sim: closing in to 20-30 m loses (opponents back off; we take fire chasing)
   bandLightning: knob("BAND_LIGHTNING", 8),
   wantMortar: knob("WANT_MORTAR", 120), // ... with a mortar (lobbed, splash hurts us up close)
@@ -51,7 +51,7 @@ const K = {
   retreatHp: knob("RETREAT_HP", 0.3), // retreat below this HP fraction if the target is not weaker
   boostFight: knob("BOOST_FIGHT", 40),
   // DIAGNOSTIC: never fire, always back away from threats. Its score = points earned without kills.
-  pacifist: knob("PACIFIST", 1),
+  pacifist: knob("PACIFIST", 0),
   maxClimb: knob("MAX_CLIMB", 45), // highest roof (m above the ground) we climb for a weapon; 0 = never // boost while strafing when energy is above this (0 = never); duel sim: -30% damage taken
 }
 

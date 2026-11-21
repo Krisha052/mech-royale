@@ -31,13 +31,16 @@ const MAXACTIVE = Number(opt("max-active", "4"))
 const BOT = opt("bot", "bot.ts")
 const ENV = opt("env", "") // comma-separated BOT_*=v for our bot
 const VERBOSE = argv.includes("--verbose")
+const DEATHLOG = argv.includes("--deathlog") // print what our bot was doing in its last seconds
 const CUBES_A = Number(opt("cubes", "0")) // our starting power cubes: +4% max HP and damage each (up to 10)
 const DROPS = !argv.includes("--no-drops") // supply drops: stand in the ring alone for capture_s -> cubes + full repair
 const HUNTER_JUMP = Number(opt("hunter-jump", "0")) // chance per decision that a strafing hunter hops (jump + short jet)
 const SHOW_BULLETS = !argv.includes("--no-bullets") // visible enemy gun bullets in obs.projectiles, as the real server sends
 const FARM = !argv.includes("--no-farm") // drones, crates, power cubes and upgrade offers
 const PICKUPS = !argv.includes("--no-pickups") // floor weapons and hunter death drops (protocol §7 Weapon loot)
-const HUNTER_MORTAR = Number(opt("hunter-mortar", "0.5")) // fraction of hunters carrying a mortar (when --hunter-weapon is not given)
+const HUNTER_MORTAR = Number(opt("hunter-mortar", "0.5"))
+// Hunters' second weapon mix, e.g. "mortar:0.35,laser:0.3,lightning:0.07" (rest gun only). Overrides --hunter-mortar.
+const HUNTER_MIX = opt("hunter-mix", "") // fraction of hunters carrying a mortar (when --hunter-weapon is not given)
 
 const stream = gunzipSync(readFileSync("kit/check/stream.jsonl.gz")).toString().split("\n")
 const hello = JSON.parse(stream[0])
@@ -302,6 +305,16 @@ function hunterThink(h: Mech, A: Mech, t: number) {
   h.fire = los && d < W.gun.range && err < 0.08
   // mortar: lob at us when it can
   h.fire2 = h.second === "mortar" && d > 30 && d < 200 && h.cool2 <= 0 && los
+  if (h.second === "lightning") h.fire2 = los && d < W.lightning.range && h.energy > 10
+  if (h.second === "laser") {
+    // charge while we are in reach; once full, aim at our body (hitscan, no lead) and let go
+    const full = W.laser.charge
+    if (h.charge >= full * 0.97) {
+      const c2 = A.center()
+      h.cmdAim = [Math.atan2(c2[1] - h.pos[1], c2[0] - h.pos[0]) + h.aimErr[0], Math.atan2(c2[2] - mz[2], hyp2(c2, h.pos)) + h.aimErr[1]]
+      h.fire2 = !(Math.abs(wrap(h.aim[0] - h.cmdAim[0])) < 0.03)
+    } else h.fire2 = los && d < W.laser.range - 10 && h.cool2 <= 0 ? true : h.charge > 0
+  }
 }
 
 // ---------- one run ----------
@@ -475,6 +488,7 @@ async function run(runSeed: number): Promise<Result> {
   let t = 0
   let tick = 0
   let slowest = 0
+  const modeLog: string[] = []
   const zone = { center: [ax, ay], radius: 2000, next_center: [ax, ay], next_radius: 1500, shrink_start: 9999, shrink_end: 9999, dps: 0 }
 
   while (t < TIME && A.hp > 0) {
@@ -485,7 +499,16 @@ async function run(runSeed: number): Promise<Result> {
       const [hx, hy] = pick(A.pos[0], A.pos[1], 160, 230)
       const h = new Mech(1 + sent, hx, hy, HUNTER_WEAPON as Weapon2)
       h.type = TYPES[sent]
-      if (!HUNTER_WEAPON && rand() < HUNTER_MORTAR) h.second = "mortar"
+      if (!HUNTER_WEAPON && HUNTER_MIX) {
+        let r = rand()
+        for (const part of HUNTER_MIX.split(",")) {
+          const [k, v] = part.split(":")
+          if ((r -= Number(v)) < 0) {
+            h.second = k as Weapon2
+            break
+          }
+        }
+      } else if (!HUNTER_WEAPON && rand() < HUNTER_MORTAR) h.second = "mortar"
       hunters.push(h)
       sent++
       lastSpawn = t
@@ -510,7 +533,7 @@ async function run(runSeed: number): Promise<Result> {
           cubes: A.cubes, upgrades: [...A.upgrades], weapons: [{ kind: "gun", cooldown: Math.max(0, A.cooldown), ammo: A.ammo, reload: Math.max(0, A.reload), stats: { ...W.gun, damage: W.gun.damage * A.gunDmgMul, cooldown: W.gun.cooldown * A.gunCdMul } }, second],
           in_zone: true, stats: { radius: M.radius, height: M.height, eye_height: M.eye_height, muzzle_height: M.muzzle_height, walk_speed: M.walk_speed, boost_speed: M.boost_speed, turn_rate: M.turn_rate, hp: A.maxHp } },
         mechs: [
-          ...visible.map((h) => ({ id: h.id, kind: "mech", pos: [...h.pos], vel: [...h.vel], aim: [...h.aim], hp: h.hp, max_hp: h.maxHp, cubes: 0, weapons: ["gun", ...(h.second ? [h.second] : [])], charging: false })),
+          ...visible.map((h) => ({ id: h.id, kind: "mech", pos: [...h.pos], vel: [...h.vel], aim: [...h.aim], hp: h.hp, max_hp: h.maxHp, cubes: 0, weapons: ["gun", ...(h.second ? [h.second] : [])], charging: h.charge > 0 })),
           ...visNpcs.map((n) => ({ id: n.id, kind: "npc", pos: [...n.pos], vel: [...n.vel], aim: [...n.aim], hp: n.hp, max_hp: n.maxHp })),
         ],
         projectiles: shells.filter((s) => s.owner !== A && (hyp2(s.p, A.pos) <= cfg.vision.near_range || (hyp2(s.p, A.pos) <= cfg.vision.range && Math.abs(wrap(Math.atan2(s.p[1] - A.pos[1], s.p[0] - A.pos[0]) - A.aim[0])) <= (cfg.vision.fov_deg * Math.PI) / 360)) && world.clear(A.eye(), s.p, 3))
@@ -529,6 +552,11 @@ async function run(runSeed: number): Promise<Result> {
       A.events = []
       const t0 = performance.now()
       const act = JSON.parse(await next())
+      if (DEATHLOG) {
+        const lab = (act.debug?.label ?? "").replace(/ s-?\d+/, "")
+        modeLog.push(`${t.toFixed(1)} ${lab} hp${Math.round(A.hp)} vis${hunters.filter((h) => h.hp > 0 && (seenUntil.get(h.id) ?? -1) >= t).length}`)
+        if (modeLog.length > 60) modeLog.shift()
+      }
       slowest = Math.max(slowest, performance.now() - t0)
       A.move = act.move ?? [0, 0]
       A.boost = !!act.boost
@@ -799,6 +827,22 @@ async function run(runSeed: number): Promise<Result> {
     }
     t += dt
     tick++
+  }
+  if (DEATHLOG && A.hp <= 0) {
+    const alive = hunters.filter((h) => h.hp > 0)
+    console.log(`--- died at ${t.toFixed(1)} s, kills ${kills}, cubes ${A.cubes}, holding ${A.second || "gun only"}; hunters alive ${alive.length}: ${alive.map((h) => `${h.type!.name}/${h.second || "gun"} at ${hyp2(h.pos, A.pos).toFixed(0)}m`).join(", ")}`)
+    console.log(`    damage taken by: ${JSON.stringify(Object.fromEntries(Object.entries(A.takenBy).map(([k, v]) => [k, Math.round(v)])))}`)
+    const last = modeLog.slice(-50)
+    // compress runs of the same mode
+    const runs: string[] = []
+    for (const l of last) {
+      const [tt, ...rest] = l.split(" ")
+      const key = rest.filter((x) => !x.startsWith("hp")).join(" ")
+      const hp = rest.find((x) => x.startsWith("hp"))
+      if (runs.length && runs[runs.length - 1].split("|")[1] === key) runs[runs.length - 1] = runs[runs.length - 1].replace(/→.*$/, `→${hp}`)
+      else runs.push(`${tt}|${key}|${hp}→${hp}`)
+    }
+    for (const r of runs) console.log("    " + r.replace(/\|/g, "  "))
   }
   send({ type: "end", place: 1, kills })
   bot.kill()

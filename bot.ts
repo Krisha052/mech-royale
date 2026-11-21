@@ -82,6 +82,11 @@ const K = {
   mortarCover: knob("MORTAR_COVER", 0),
   mortarMin: knob("MORTAR_MIN", 80), // preferred lobbing distance band, m
   mortarMax: knob("MORTAR_MAX", 180),
+  // Bullet dodging (Robocode-style): visible enemy bullets come with position and velocity;
+  // sidestep the ones that would hit us within the next second.
+  bulletDodge: knob("BULLET_DODGE", 1), // arena (4 seeds x 30): 2.94 -> 3.65 kills with margin 1, better on every seed
+  bulletMargin: knob("BULLET_MARGIN", 1), // extra metres beyond our radius that count as a hit
+  bulletHorizon: knob("BULLET_HORIZON", 1.0), // react to bullets arriving within this many seconds
   dodge: knob("DODGE", 1), // move away from where an incoming mortar shell will land (arena: 0.93 -> 1.23 vs mortar hunters)
   dodgeMargin: knob("DODGE_MARGIN", 2), // extra metres beyond splash + our radius
   recoverHp: knob("RECOVER_HP", 0), // between fights: below this HP fraction, stay out of sight to regen (0 = off)
@@ -621,6 +626,57 @@ run((hello: Hello) => {
           }
         }
       } else if (climbFor && !goingFor) climbFor = null
+
+      // ---- dodge bullets: sidestep any visible bullet that would pass through us soon ----
+      if (K.bulletDodge > 0) {
+        const r = (me.stats.radius ?? cfg.mech.radius) + K.bulletMargin
+        const h = me.stats.height ?? cfg.mech.height
+        let dx = 0
+        let dy = 0
+        let threats = 0
+        for (const pr of obs.projectiles) {
+          if (pr.kind !== "gun" && pr.kind !== "npc") continue
+          const v = pr.vel
+          const bl = Math.hypot(v[0], v[1])
+          if (bl < 1) continue
+          // bullet relative to us, assuming we keep our current velocity
+          const rx = pr.pos[0] - pos[0]
+          const ry = pr.pos[1] - pos[1]
+          const rvx = v[0] - me.vel[0]
+          const rvy = v[1] - me.vel[1]
+          const tca = -(rx * rvx + ry * rvy) / (rvx * rvx + rvy * rvy)
+          if (tca < 0.02 || tca > K.bulletHorizon) continue
+          const cx = rx + rvx * tca
+          const cy = ry + rvy * tca
+          const bz = pr.pos[2] + v[2] * tca
+          if (Math.hypot(cx, cy) > r || bz < pos[2] - 0.5 || bz > pos[2] + h + 0.5) continue
+          // move perpendicular to the bullet's path, to the side that grows the miss distance
+          const px = -v[1] / bl
+          const py = v[0] / bl
+          let side = -(cx * px + cy * py)
+          if (Math.abs(side) < 0.3) side = me.vel[0] * px + me.vel[1] * py || strafeSign
+          const sgn = side >= 0 ? 1 : -1
+          const w = 1 / Math.max(tca, 0.1)
+          dx += px * sgn * w
+          dy += py * sgn * w
+          threats++
+        }
+        if (threats) {
+          let dir = Math.atan2(dy, dx)
+          for (const off of [0, Math.PI]) {
+            // the chosen side, or the other one if a wall is in the way
+            const a = dir + off
+            const [gi, gj] = world.navOf(pos[0] + Math.cos(a) * 6, pos[1] + Math.sin(a) * 6)
+            if (world.walkable(gi, gj)) {
+              dir = a
+              break
+            }
+          }
+          act.move = [Math.cos(dir), Math.sin(dir)]
+          act.boost = me.energy > 10
+          mode = "dodge bullet"
+        }
+      }
 
       // ---- dodge mortar shells: predict where each lands and get out of the splash ----
       if (K.dodge > 0) {

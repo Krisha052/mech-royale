@@ -33,6 +33,7 @@ const ENV = opt("env", "") // comma-separated BOT_*=v for our bot
 const VERBOSE = argv.includes("--verbose")
 const CUBES_A = Number(opt("cubes", "0")) // our starting power cubes: +4% max HP and damage each (up to 10)
 const DROPS = !argv.includes("--no-drops") // supply drops: stand in the ring alone for capture_s -> cubes + full repair
+const SHOW_BULLETS = !argv.includes("--no-bullets") // visible enemy gun bullets in obs.projectiles, as the real server sends
 const FARM = !argv.includes("--no-farm") // drones, crates, power cubes and upgrade offers
 const PICKUPS = !argv.includes("--no-pickups") // floor weapons and hunter death drops (protocol §7 Weapon loot)
 const HUNTER_MORTAR = Number(opt("hunter-mortar", "0.5")) // fraction of hunters carrying a mortar (when --hunter-weapon is not given)
@@ -506,7 +507,8 @@ async function run(runSeed: number): Promise<Result> {
           ...visNpcs.map((n) => ({ id: n.id, kind: "npc", pos: [...n.pos], vel: [...n.vel], aim: [...n.aim], hp: n.hp, max_hp: n.maxHp })),
         ],
         projectiles: shells.filter((s) => s.owner !== A && (hyp2(s.p, A.pos) <= cfg.vision.near_range || (hyp2(s.p, A.pos) <= cfg.vision.range && Math.abs(wrap(Math.atan2(s.p[1] - A.pos[1], s.p[0] - A.pos[0]) - A.aim[0])) <= (cfg.vision.fov_deg * Math.PI) / 360)) && world.clear(A.eye(), s.p, 3))
-          .map((s, i) => ({ id: 300 + i, kind: "mortar", pos: [...s.p], vel: [...s.v] })),
+          .map((s, i) => ({ id: 300 + i, kind: "mortar", pos: [...s.p], vel: [...s.v] }))
+          .concat(SHOW_BULLETS ? bullets.filter((b) => b.owner !== A && b.owner.kind === "mech" && inView(b.p, 0)).map((b, i) => ({ id: 600 + i, kind: "gun", pos: [...b.p], vel: [...b.v] })) : []),
         crates: crates.filter((c) => c.hp > 0 && inView(c.pos, 1.2)).map((c) => ({ id: c.id, pos: [...c.pos], hp: c.hp })),
         cubes: cubes.filter((c) => inView(c.pos, 0.5)).map((c) => ({ id: c.id, pos: [...c.pos] })),
         pickups: pickups.filter((p) => {

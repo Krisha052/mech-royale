@@ -78,6 +78,10 @@ const K = {
   kiteBand: knob("KITE_BAND", 10),
   kiteRadial: knob("KITE_RADIAL", 2), // weight of backing off vs strafing
   kiteBoost: knob("KITE_BOOST", 15), // boost while backing off if energy is above this
+  // Mortar from cover: with a mortar, stand where no enemy can see us and lob shells over the cover.
+  mortarCover: knob("MORTAR_COVER", 0),
+  mortarMin: knob("MORTAR_MIN", 80), // preferred lobbing distance band, m
+  mortarMax: knob("MORTAR_MAX", 180),
   dodge: knob("DODGE", 1), // move away from where an incoming mortar shell will land (arena: 0.93 -> 1.23 vs mortar hunters)
   dodgeMargin: knob("DODGE_MARGIN", 2), // extra metres beyond splash + our radius
   recoverHp: knob("RECOVER_HP", 0), // between fights: below this HP fraction, stay out of sight to regen (0 = off)
@@ -116,6 +120,8 @@ run((hello: Hello) => {
   let lastThreat: Threat | null = null
   let scanYaw = 0
   let recovering = false
+  let coverSpot: P2 | null = null
+  let coverTick = -999
   let fightSpot: P2 | null = null
   let fightSpotTick = -999
   // Weapons on the ground never despawn: remember every one we have seen.
@@ -425,6 +431,37 @@ run((hello: Hello) => {
         }
         const p: P2 = [pos[0] + mx * 12, pos[1] + my * 12]
         goal = insideSafe(p) ? p : anchor
+        if (K.mortarCover > 0 && kind2 === "mortar" && !light) {
+          // re-pick a hidden lobbing spot about twice a second
+          if (!coverSpot || tick - coverTick >= 5 * cfg.match.decide_every) {
+            let best: P2 | null = null
+            let bestScore = -Infinity
+            const foes = mechs.slice(0, 4)
+            for (let k = 0; k < 16; k++) {
+              const a = (k / 16) * TAU
+              for (const r of [0, 10, 20, 35]) {
+                if (r === 0 && k > 0) continue
+                const c: P2 = [pos[0] + Math.cos(a) * r, pos[1] + Math.sin(a) * r]
+                const [gi, gj] = world.navOf(c[0], c[1])
+                if (!world.walkable(gi, gj) || !insideSafe(c)) continue
+                const gz = world.groundAt(c[0], c[1])
+                const dT = d2(c, target!.pos)
+                let score = -r * 0.4 - (dT < K.mortarMin ? (K.mortarMin - dT) * 0.6 : dT > K.mortarMax ? (dT - K.mortarMax) * 0.6 : 0)
+                for (const o of foes) if (!world.clear([o.pos[0], o.pos[1], o.pos[2] + 8], [c[0], c[1], gz + 6], 2)) score += 50 / foes.length
+                if (score > bestScore) {
+                  bestScore = score
+                  best = c
+                }
+              }
+            }
+            coverSpot = best
+            coverTick = tick
+          }
+          if (coverSpot) {
+            goal = coverSpot
+            mode = "mortar cover"
+          }
+        } else coverSpot = null
         // Unarmed: a laser or mortar on the ground nearby is worth more than strafing in place
         // (arena: about a quarter of runs end with only the gun, the weakest setup by far).
         if (K.grabInFight > 0 && !armed) {

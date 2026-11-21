@@ -1,11 +1,12 @@
 #!/bin/bash
-# Average kills over 4 seeds x RUNS for each setting. Usage: tools/arena-multi.sh RUNS "name:BOT_X=1,BOT_Y=2" ...
+# Average kills over 4 seeds x RUNS for each setting. Usage: tools/arena-multi.sh RUNS "name:BOT_X=1,BOT_Y=2|--sim-option" ...
 runs=$1; shift
 tmp=$(mktemp -d)
 for spec in "$@"; do
-  name=${spec%%:*}; envs=${spec#*:}; [ "$envs" = "$spec" ] && envs=""
+  name=${spec%%:*}; rest=${spec#*:}; [ "$rest" = "$spec" ] && rest=""
+  envs=${rest%%|*}; extra=""; [[ "$rest" == *"|"* ]] && extra=${rest#*|}
   for sd in 3 5 7 9; do
-    ( bun tools/arena-sim.ts --runs "$runs" --seed $sd --env "$envs" | tail -1 | grep -oE 'kills mean [0-9.]+' | awk '{print $3}' > "$tmp/$name-$sd" ) &
+    ( bun tools/arena-sim.ts --runs "$runs" --seed $sd --env "$envs" $extra | tail -1 | grep -oE 'kills mean [0-9.]+' | awk '{print $3}' > "$tmp/$name-$sd" ) &
   done
 done
 wait

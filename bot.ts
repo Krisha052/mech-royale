@@ -87,6 +87,7 @@ const K = {
   bulletDodge: knob("BULLET_DODGE", 1), // arena (4 seeds x 30): 2.94 -> 3.65 kills with margin 1, better on every seed
   bulletMargin: knob("BULLET_MARGIN", 1), // extra metres beyond our radius that count as a hit
   bulletHorizon: knob("BULLET_HORIZON", 1.0), // react to bullets arriving within this many seconds
+  gravityLead: knob("GRAVITY_LEAD", 1), // lead airborne targets along a falling arc (not a straight line)
   dodge: knob("DODGE", 1), // move away from where an incoming mortar shell will land (arena: 0.93 -> 1.23 vs mortar hunters)
   dodgeMargin: knob("DODGE_MARGIN", 2), // extra metres beyond splash + our radius
   recoverHp: knob("RECOVER_HP", 0), // between fights: below this HP fraction, stay out of sight to regen (0 = off)
@@ -193,14 +194,33 @@ run((hello: Hello) => {
     return [m.pos[0], m.pos[1], m.pos[2] + (h * s) / 2]
   }
 
-  function leadPoint(from: Vec3, m: ActorObs, speed: number): Vec3 {
+  /**
+   * Where the target's body centre will be when our bullet arrives. Horizontal motion is held
+   * constant; vertical motion follows gravity while the target is in the air (house bots jump and
+   * jet onto roofs a lot), and never goes below the surface under its predicted position.
+   */
+  function predictCenter(m: ActorObs, t: number): Vec3 {
     const c = center(m)
-    let t = Math.hypot(c[0] - from[0], c[1] - from[1], c[2] - from[2]) / speed
-    for (let i = 0; i < 2; i++) {
-      const p = [c[0] + m.vel[0] * t, c[1] + m.vel[1] * t, c[2] + m.vel[2] * t]
+    const x = c[0] + m.vel[0] * t
+    const y = c[1] + m.vel[1] * t
+    if (K.gravityLead <= 0) return [x, y, c[2] + Math.max(0, m.vel[2]) * t]
+    const half = c[2] - m.pos[2]
+    const floorNow = world.standZ(m.pos[0], m.pos[1], m.pos[2] + 0.5)
+    const airborne = m.pos[2] > floorNow + 0.3 || Math.abs(m.vel[2]) > 0.5
+    if (!airborne) return [x, y, c[2]]
+    const g = cfg.mech.gravity
+    const feet = m.pos[2] + m.vel[2] * t - 0.5 * g * t * t
+    const floor = world.standZ(x, y, Math.max(m.pos[2], feet) + 0.5)
+    return [x, y, Math.max(floor, feet) + half]
+  }
+  function leadPoint(from: Vec3, m: ActorObs, speed: number): Vec3 {
+    let p = center(m)
+    let t = 0
+    for (let i = 0; i < 3; i++) {
       t = Math.hypot(p[0] - from[0], p[1] - from[1], p[2] - from[2]) / speed
+      p = predictCenter(m, t)
     }
-    return [c[0] + m.vel[0] * t, c[1] + m.vel[1] * t, c[2] + Math.max(0, m.vel[2]) * t]
+    return p
   }
 
   /** Mortar pitch to hit a point dx away horizontally and dz above; null if out of range. */

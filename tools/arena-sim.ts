@@ -33,6 +33,7 @@ const ENV = opt("env", "") // comma-separated BOT_*=v for our bot
 const VERBOSE = argv.includes("--verbose")
 const CUBES_A = Number(opt("cubes", "0")) // our starting power cubes: +4% max HP and damage each (up to 10)
 const DROPS = !argv.includes("--no-drops") // supply drops: stand in the ring alone for capture_s -> cubes + full repair
+const HUNTER_JUMP = Number(opt("hunter-jump", "0")) // chance per decision that a strafing hunter hops (jump + short jet)
 const SHOW_BULLETS = !argv.includes("--no-bullets") // visible enemy gun bullets in obs.projectiles, as the real server sends
 const FARM = !argv.includes("--no-farm") // drones, crates, power cubes and upgrade offers
 const PICKUPS = !argv.includes("--no-pickups") // floor weapons and hunter death drops (protocol §7 Weapon loot)
@@ -128,6 +129,7 @@ class Mech {
   nextFlip = 0
   boostUntil = 0
   aimErr: [number, number] = [0, 0]
+  jumpUntil = -1
   constructor(public id: number, x: number, y: number, second: Weapon2) {
     this.pos = [x, y, world.groundAt(x, y)]
     this.second = second
@@ -277,7 +279,13 @@ function hunterThink(h: Mech, A: Mech, t: number) {
     h.move = [Math.cos(side) + radial * Math.cos(toA), Math.sin(side) + radial * Math.sin(toA)]
     if (t > h.boostUntil && rand() < 0.03) h.boostUntil = t + 1.5
     h.boost = t < h.boostUntil && h.energy > 20
+    // house bots spend 7-43% of the match off the ground (public replay): hop now and then
+    if (HUNTER_JUMP > 0 && h.grounded && rand() < HUNTER_JUMP && h.energy > 30) {
+      h.jumpUntil = t + 0.15
+      h.boostUntil = Math.max(h.boostUntil, t + 0.5 + rand() * 0.6)
+    }
   }
+  h.jump = t < h.jumpUntil
   // aim: lead with the gun's bullet speed, plus a slowly varying aim error
   const c = A.center()
   const mz = h.muzzle()
@@ -294,7 +302,6 @@ function hunterThink(h: Mech, A: Mech, t: number) {
   h.fire = los && d < W.gun.range && err < 0.08
   // mortar: lob at us when it can
   h.fire2 = h.second === "mortar" && d > 30 && d < 200 && h.cool2 <= 0 && los
-  h.jump = false
 }
 
 // ---------- one run ----------

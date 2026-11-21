@@ -28,6 +28,21 @@ const WEAPON_RANK: Record<string, number> = { laser: 3, lightning: 2, mortar: 1,
 
 type Threat = { bearing: number; by: number | null; t: number }
 
+// Fighting knobs. Defaults are the submitted behavior; tools/duel.py overrides them with env vars to compare.
+const knob = (name: string, dflt: number) => {
+  const v = Number(process.env[`BOT_${name}`])
+  return Number.isFinite(v) && process.env[`BOT_${name}`] !== undefined ? v : dflt
+}
+const K = {
+  want: knob("WANT", 90), // preferred fight distance, m
+  band: knob("BAND", 30), // no radial movement within want +- band
+  radial: knob("RADIAL", 0.8), // weight of closing/opening distance vs sideways
+  flipMin: knob("FLIP_MIN", 0.8), // strafe direction lasts flipMin + rand * flipRand s
+  flipRand: knob("FLIP_RAND", 1.4),
+  flipOnHit: knob("FLIP_ON_HIT", 1), // reverse strafe when hit
+  boostFight: knob("BOOST_FIGHT", 40), // boost while strafing when energy is above this (0 = never); duel sim: -30% damage taken
+}
+
 run((hello: Hello) => {
   const cfg = hello.config
   const t0 = performance.now()
@@ -135,7 +150,7 @@ run((hello: Hello) => {
         if (e.type === "damaged" && e.weapon !== "zone" && e.bearing !== null) {
           lastThreat = { bearing: e.bearing, by: e.by, t }
           // their aim has caught up with our current path: change direction now
-          if (t > nextStrafeFlip - 1.5) {
+          if (K.flipOnHit && t > nextStrafeFlip - 1.5) {
             strafeSign = -strafeSign
             nextStrafeFlip = t + 0.6 + rand() * 1.2
           }
@@ -226,15 +241,14 @@ run((hello: Hello) => {
         mode = "fight"
         if (t > nextStrafeFlip) {
           strafeSign = rand() < 0.5 ? -1 : 1
-          nextStrafeFlip = t + 0.8 + rand() * 1.4
+          nextStrafeFlip = t + K.flipMin + rand() * K.flipRand
         }
         const dist = d2(target.pos, pos)
         const toT = yawTo(pos, target.pos)
-        const want = 90
-        const radial = dist > want + 30 ? 1 : dist < want - 30 ? -1 : 0
+        const radial = dist > K.want + K.band ? 1 : dist < K.want - K.band ? -1 : 0
         const side = toT + (strafeSign * Math.PI) / 2
-        const mx = Math.cos(side) + radial * Math.cos(toT) * 0.8
-        const my = Math.sin(side) + radial * Math.sin(toT) * 0.8
+        const mx = Math.cos(side) + radial * Math.cos(toT) * K.radial
+        const my = Math.sin(side) + radial * Math.sin(toT) * K.radial
         const p: P2 = [pos[0] + mx * 12, pos[1] + my * 12]
         goal = insideSafe(p) ? p : anchor
       } else {
@@ -279,7 +293,7 @@ run((hello: Hello) => {
         act.jump = me.grounded
         act.boost = !me.grounded && me.energy > 10
       } else {
-        act.boost = me.energy > 30 && (mode === "zone!" || mode === "retreat" || (mode === "to zone" && d2(pos, goal) > 60))
+        act.boost = me.energy > 30 && (mode === "zone!" || mode === "retreat" || (mode === "to zone" && d2(pos, goal) > 60) || (K.boostFight > 0 && mode === "fight" && me.energy > K.boostFight))
       }
 
       // ---- aim and fire ----

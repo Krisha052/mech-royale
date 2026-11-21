@@ -343,7 +343,9 @@ run((hello: Hello) => {
         act.jump = me.grounded
         act.boost = !me.grounded && me.energy > 10
       } else {
-        act.boost = me.energy > 30 && (mode === "zone!" || mode === "retreat" || (mode === "to zone" && d2(pos, goal) > 60) || (K.boostFight > 0 && mode === "fight" && me.energy > K.boostFight))
+        // Race for a laser on the ground (a roof one needs the energy for the climb).
+        const rushLaser = goingFor?.kind === "laser" && goingFor.pos[2] <= world.groundAt(goingFor.pos[0], goingFor.pos[1]) + 3 && d2(pos, goal) > 8
+        act.boost = (me.energy > 30 && (mode === "zone!" || mode === "retreat" || (mode === "to zone" && d2(pos, goal) > 60) || (K.boostFight > 0 && mode === "fight" && me.energy > K.boostFight))) || (rushLaser && me.energy > 15)
       }
 
       // ---- climbing to a roof weapon (protocol.md §7: jump, jet until the feet clear the edge) ----
@@ -453,7 +455,9 @@ run((hello: Hello) => {
       } else {
         // nothing to shoot: sweep the whole circle to spot weapons, cubes and enemies
         // (vision is a 120 deg wedge out to 200 m; proximity sensors only reach 45 m)
-        scanYaw = wrap(scanYaw + 0.12)
+        // House bots take nearby weapons within 2-11 s of spawning (house replay), so look around
+        // fast at the start: a full circle in about 2 s for the first 20 s, then every ~4 s.
+        scanYaw = wrap(scanYaw + (t < 20 ? 0.35 : 0.16))
         aimYaw = scanYaw
       }
       // reload while nothing to shoot

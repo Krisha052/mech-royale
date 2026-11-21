@@ -61,7 +61,7 @@ const K = {
   farm: knob("FARM", 1), // in free time, go and shoot drones and ground crates for cubes (arena: 2.17 -> 2.73 kills, cubes at death 3.0 -> 6.1)
   farmUntil: knob("FARM_UNTIL", 300), // match time after which we stop farming, s
   farmRange: knob("FARM_RANGE", 150), // how far we walk for a drone or crate, m
-  farmMinHp: knob("FARM_MIN_HP", 0.7), // do not farm below this HP fraction
+  farmMinHp: knob("FARM_MIN_HP", 0.85), // arena (4 seeds x 30): 0.85 -> 2.72 kills vs 0.70 -> 2.52 // do not farm below this HP fraction
   npcStandoff: knob("NPC_STANDOFF", 70), // shoot drones from here (their aggro range is 45 m)
   cubeRange: knob("CUBE_RANGE", 150), // walk this far for a visible cube
   shootNpc: knob("SHOOT_NPC", 1), // shoot drones we happen to pass (when not farming)

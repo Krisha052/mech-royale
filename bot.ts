@@ -28,7 +28,8 @@ const UPGRADE_ORDER = [
 // laser_damage 8.00, laser_charge 6.00, armor 5.50, plating 5.19.
 const LASER_UPGRADE_ORDER = ["laser_damage", "laser_charge", ...UPGRADE_ORDER.filter((u) => u !== "laser_damage" && u !== "laser_charge")]
 // Weapon preference for the second slot.
-const WEAPON_RANK: Record<string, number> = { laser: 3, lightning: 2, mortar: 1, gun: 0 }
+// Real-map arena sim (30 runs, kills before death): laser 4.13, mortar 3.30, lightning 1.75, none 1.6.
+const WEAPON_RANK: Record<string, number> = { laser: 3, mortar: 2, lightning: 1, gun: 0 }
 
 type Threat = { bearing: number; by: number | null; t: number }
 
@@ -38,17 +39,24 @@ const knob = (name: string, dflt: number) => {
   return Number.isFinite(v) && process.env[`BOT_${name}`] !== undefined ? v : dflt
 }
 const K = {
-  want: knob("WANT", 90), // preferred fight distance with the gun alone, m
+  // Preferred fight distances. Real-map arena sim (30 runs, kills before death): gun 140 m 2.00 vs
+  // 90 m 1.63; laser 180 m 4.13 vs 140 m 3.60 vs 90 m 3.25; mortar 120-160 m ~3.3. House bots
+  // fight at ~55 m and miss more with range, while our led shots stay accurate.
+  want: knob("WANT", 140), // preferred fight distance with the gun alone, m
   band: knob("BAND", 30), // no radial movement within want +- band
-  wantLaser: knob("WANT_LASER", 140), // ... when holding a laser (hitscan, 280 m). Gauntlet sim: 140 m beats 90 m vs leading (6.75 vs 5.19) and approaching hunters (3.75 vs 3.00)
-  wantLightning: knob("WANT_LIGHTNING", 90), // ... with lightning (45 m reach). Duel sim: closing in to 20-30 m loses (opponents back off; we take fire chasing)
+  wantLaser: knob("WANT_LASER", 180), // ... when holding a laser (hitscan, 280 m)
+  wantLightning: knob("WANT_LIGHTNING", 140), // ... with lightning (45 m reach): fight like the gun; closing in loses in both sims
   bandLightning: knob("BAND_LIGHTNING", 8),
-  wantMortar: knob("WANT_MORTAR", 120), // ... with a mortar (lobbed, splash hurts us up close)
+  wantMortar: knob("WANT_MORTAR", 140), // ... with a mortar (lobbed; splash hurts us up close)
   radial: knob("RADIAL", 0.8), // weight of closing/opening distance vs sideways
   flipMin: knob("FLIP_MIN", 0.8), // strafe direction lasts flipMin + rand * flipRand s
   flipRand: knob("FLIP_RAND", 1.4),
   flipOnHit: knob("FLIP_ON_HIT", 1), // reverse strafe when hit
   retreatHp: knob("RETREAT_HP", 0.3), // retreat below this HP fraction if the target is not weaker
+  retreatN: knob("RETREAT_N", 3), // retreat when this many enemies are within 120 m
+  recoverHp: knob("RECOVER_HP", 0), // between fights: below this HP fraction, stay out of sight to regen (0 = off)
+  recoverTo: knob("RECOVER_TO", 0.85), // ... until back above this
+  recoverRange: knob("RECOVER_RANGE", 100), // ... unless an enemy is closer than this (then fight)
   boostFight: knob("BOOST_FIGHT", 40),
   // DIAGNOSTIC: never fire, always back away from threats. Its score = points earned without kills.
   pacifist: knob("PACIFIST", 0),
@@ -81,6 +89,7 @@ run((hello: Hello) => {
   let nextStrafeFlip = 0
   let lastThreat: Threat | null = null
   let scanYaw = 0
+  let recovering = false
   // Weapons on the ground never despawn: remember every one we have seen.
   const knownPickups = new Map<number, { kind: string; pos: Vec3 }>()
   // roof pickups we failed to reach: not retried
@@ -233,7 +242,15 @@ run((hello: Hello) => {
       // Retreat only when it pays: low and the fight is not going our way, or badly outnumbered.
       // Backing away from a single attacker mostly hands it free shots.
       const targetFrac = target && target.hp !== undefined && target.max_hp ? target.hp / target.max_hp : 1
-      const retreat = threatened && (K.pacifist > 0 || (hpFrac < K.retreatHp && targetFrac >= hpFrac) || near.length >= 3)
+      // Between fights, heal: regen needs 5 s without dealing or taking damage, so stay out of
+      // sight until HP is back up, unless someone is already close (then running hands them free shots).
+      const closest = mechs.reduce((m, e) => Math.min(m, d2(e.pos, pos)), Infinity)
+      if (K.recoverHp > 0) {
+        if (hpFrac < K.recoverHp) recovering = true
+        if (hpFrac >= K.recoverTo) recovering = false
+      }
+      const recover = recovering && closest > K.recoverRange
+      const retreat = (threatened || recover) && (K.pacifist > 0 || recover || (hpFrac < K.retreatHp && targetFrac >= hpFrac) || near.length >= K.retreatN)
       const safeR = obs.zone.next_radius * 0.6
       const insideSafe = (p: number[]) => d2(p, obs.zone.next_center) <= Math.max(safeR, 15)
 
@@ -304,7 +321,9 @@ run((hello: Hello) => {
           const detour = (dist / (me.stats.walk_speed ?? cfg.mech.walk_speed)) * 2
           if (dist > reachKm(p.kind) || (!insideSafe(p.pos) && slack - detour < 20) || (dist > 80 && slack < 25)) continue
           // metres of walking each kind is worth: the sim says a laser is worth far more than the rest
-          const cost = dist - (p.kind === "laser" ? 150 : p.kind === "mortar" ? 40 : 20)
+          // metres of walking each kind is worth: house bots grab weapons within seconds, and in the
+          // arena sim a mortar is nearly as good as a laser, so take whichever of the two is closer
+          const cost = dist - (p.kind === "laser" ? 150 : p.kind === "mortar" ? 120 : 10)
           if (cost < pickCost) {
             pickCost = cost
             pick = { id, ...p }

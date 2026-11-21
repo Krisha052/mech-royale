@@ -49,7 +49,9 @@ class Mech:
         self.last_combat = -99.0; self.last_spend = -99.0
         self.events = []; self.seen_until = -99.0
         self.stats = dict(shots=0, hits=0, dmg=0.0, rear=0, taken=0.0, spd=0.0, n=0, lshots=0, lhits=0, ldmg=0.0)
-        self.second = None  # "laser" or None
+        self.second = None  # "laser", "lightning" or None
+        self.wcfg = cfg["weapons"]  # this mech's weapon numbers (may carry upgrade overrides)
+        self.armor = 0.0
         self.fire2 = False; self.charge = 0.0; self.held_full = 0.0; self.cool2 = 0.0
 
     def eye(self):
@@ -72,13 +74,14 @@ def sees(a, b, t, cfg):
 
 
 def obs_for(me, other, t, tick, cfg, alive):
-    w = cfg["weapons"]["gun"]; m = cfg["mech"]
+    w = me.wcfg["gun"]; m = cfg["mech"]
     o = {
         "type": "obs", "tick": tick, "t": round(t, 2), "alive": alive,
         "self": {"id": me.id, "pos": me.pos, "vel": me.vel, "aim": me.aim, "hp": me.hp, "max_hp": me.max_hp,
                  "energy": me.energy, "max_energy": m["energy"], "grounded": True, "cubes": 0, "upgrades": [],
                  "weapons": [{"kind": "gun", "cooldown": max(0, me.cooldown), "ammo": me.ammo, "reload": max(0, me.reload), "stats": w},
-                             ({"kind": "laser", "cooldown": max(0, me.cool2), "charge": me.charge, "stats": cfg["weapons"]["laser"]} if me.second == "laser" else None)],
+                             ({"kind": "laser", "cooldown": max(0, me.cool2), "charge": me.charge, "stats": me.wcfg["laser"]} if me.second == "laser"
+                              else {"kind": "lightning", "cooldown": max(0, me.cool2), "stats": me.wcfg["lightning"]} if me.second == "lightning" else None)],
                  "in_zone": True, "stats": {k: m[k] for k in ("radius", "height", "eye_height", "muzzle_height", "walk_speed", "boost_speed", "turn_rate", "hp")}},
         "mechs": [], "projectiles": [], "crates": [], "cubes": [], "pickups": [], "sounds": [], "beams": [],
         "events": me.events, "drops": [], "offer": None,
@@ -104,6 +107,16 @@ def hit_test(p0, p1, target, cfg):
     return None
 
 
+def weapon_cfg(cfg, spec):
+    """Copy of the weapon numbers with overrides like 'laser.charge*0.75,laser.damage*1.18' (upgrades)."""
+    w = json.loads(json.dumps(cfg["weapons"]))
+    for item in filter(None, (spec or "").split(",")):
+        key, op, val = (item.partition("*") if "*" in item else item.partition("="))
+        kind, stat = key.strip().split(".")
+        w[kind][stat] = w[kind][stat] * float(val) if op == "*" else float(val)
+    return w
+
+
 def game(cmds, cfg, hello, args, seed):
     rnd = random.Random(seed)
     terrain = Terrain(args.map)
@@ -114,7 +127,8 @@ def game(cmds, cfg, hello, args, seed):
         for kv in filter(None, (extra or "").split(",")):
             k, v = kv.split("="); e[k.strip()] = v.strip()
         envs.append(e)
-    procs = [subprocess.Popen(shlex.split(c), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1, env=envs[i]) for i, c in enumerate(cmds)]
+    spawn = lambda i: subprocess.Popen(shlex.split(cmds[i]), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1, env=envs[i])
+    procs = [spawn(0), spawn(1)]
     a0 = rnd.uniform(-math.pi, math.pi)
     mechs = []
     for i in range(2):
@@ -122,6 +136,8 @@ def game(cmds, cfg, hello, args, seed):
         x = CX + math.cos(a0) * side * args.dist / 2; y = CY + math.sin(a0) * side * args.dist / 2
         mechs.append(Mech(i, [x, y, terrain.at(x, y)], rnd.uniform(-math.pi, math.pi), cfg))
         mechs[-1].second = (args.weaponA, args.weaponB)[i] or None
+        mechs[-1].wcfg = weapon_cfg(cfg, (args.upA, args.upB)[i])
+        if i == 0: mechs[0].hp = mechs[0].max_hp = cfg["mech"]["hp"] * args.hpA; mechs[0].armor = args.armorA
     for i, p in enumerate(procs):
         h = dict(hello); h["slot"] = i; h["seed"] = rnd.randrange(1, 2**31)
         p.stdin.write(json.dumps(h) + "\n"); p.stdin.flush(); p.stdout.readline()
@@ -129,9 +145,30 @@ def game(cmds, cfg, hello, args, seed):
     dt = 1 / cfg["match"]["tick_hz"]
     bullets = []  # [owner, pos, vel, travelled]
     t, tick, think_ms = 0.0, 0, [[], []]
-    while t < args.time and all(x.hp > 0 for x in mechs):
+    kills, respawn_at = 0, None
+    def running():
+        if args.gauntlet: return t < args.time and mechs[0].hp > 0
+        return t < args.time and all(x.hp > 0 for x in mechs)
+    while running():
+        if args.gauntlet and mechs[1].hp <= 0:
+            if respawn_at is None:
+                kills += 1; respawn_at = t + args.gap
+                try: procs[1].stdin.write(json.dumps({"type": "end", "place": 2, "kills": 0}) + "\n"); procs[1].stdin.flush()
+                except BrokenPipeError: pass
+                bullets = [b for b in bullets if b[0] != 1]
+            elif t >= respawn_at:
+                respawn_at = None
+                a = rnd.uniform(-math.pi, math.pi); A = mechs[0]
+                x = min(max(A.pos[0] + math.cos(a) * args.dist, CX - 390), CX + 110); y = min(max(A.pos[1] + math.sin(a) * args.dist, CY - 190), CY + 190)
+                old_stats = mechs[1].stats
+                mechs[1] = Mech(1, [x, y, terrain.at(x, y)], math.atan2(A.pos[1] - y, A.pos[0] - x), cfg)
+                mechs[1].stats = old_stats; mechs[1].second = args.weaponB or None; mechs[1].wcfg = weapon_cfg(cfg, args.upB)
+                procs[1] = spawn(1)
+                h = dict(hello); h["slot"] = 1; h["seed"] = rnd.randrange(1, 2**31)
+                procs[1].stdin.write(json.dumps(h) + "\n"); procs[1].stdin.flush(); procs[1].stdout.readline()
         if tick % cfg["match"]["decide_every"] == 0:
             for i, (me, p) in enumerate(zip(mechs, procs)):
+                if me.hp <= 0: continue
                 o = obs_for(me, mechs[1 - i], t, tick, cfg, 2)
                 t0 = time.perf_counter(); p.stdin.write(json.dumps(o) + "\n"); p.stdin.flush()
                 a = json.loads(p.stdout.readline()); think_ms[i].append((time.perf_counter() - t0) * 1000)
@@ -141,6 +178,7 @@ def game(cmds, cfg, hello, args, seed):
                 fr = a.get("fire") or [False, False]
                 me.fire = bool(fr[0]); me.fire2 = bool(fr[1]) if len(fr) > 1 else False; me.want_reload = bool(a.get("reload"))
         for me in mechs:
+            if me.hp <= 0: continue
             # aim slews
             dy = wrap(me.cmd_aim[0] - me.aim[0]); step = m["turn_rate"] * dt
             me.aim[0] = wrap(me.aim[0] + max(-step, min(step, dy)))
@@ -160,7 +198,8 @@ def game(cmds, cfg, hello, args, seed):
             me.pos[0] = min(max(me.pos[0], CX - 400), CX + 120); me.pos[1] = min(max(me.pos[1], CY - 200), CY + 200)
             me.pos[2] = terrain.at(me.pos[0], me.pos[1])
             me.stats["spd"] += math.hypot(me.vel[0], me.vel[1]); me.stats["n"] += 1
-            # gun
+            # gun (this mech's numbers, so upgrade overrides apply)
+            g = me.wcfg["gun"]
             me.cooldown -= dt
             if me.reload > 0:
                 me.reload -= dt
@@ -177,8 +216,25 @@ def game(cmds, cfg, hello, args, seed):
                 me.cooldown = g["cooldown"]; me.ammo -= 1; me.stats["shots"] += 1; me.last_combat = t
                 if me.ammo == 0: me.reload = g["reload"]
             # laser: hold to charge, release (or held full for hold_s) to fire a hitscan beam
+            if me.second == "lightning":
+                Z = me.wcfg["lightning"]; me.cool2 -= dt
+                if me.fire2 and me.cool2 <= 0 and me.energy >= Z["energy"]:
+                    me.cool2 = Z["cooldown"]; me.energy -= Z["energy"]; me.last_spend = t; me.last_combat = t
+                    me.stats["zshots"] = me.stats.get("zshots", 0) + 1
+                    tgt = mechs[1 - me.id]
+                    if tgt.hp > 0:
+                        d = math.hypot(tgt.pos[0] - me.pos[0], tgt.pos[1] - me.pos[1])
+                        yaw = math.atan2(tgt.pos[1] - me.pos[1], tgt.pos[0] - me.pos[0])
+                        if d <= Z["range"] + m["radius"] and abs(wrap(yaw - me.aim[0])) <= math.radians(Z["cone_deg"]) / 2:
+                            inc = math.atan2(me.pos[1] - tgt.pos[1], me.pos[0] - tgt.pos[0])
+                            rear = abs(wrap(inc - tgt.aim[0])) > math.radians(m["front_arc_deg"]) / 2
+                            dmg = Z["damage"] * (m["rear_mult"] if rear else 1)
+                            dmg *= (1 - tgt.armor); tgt.hp -= dmg; tgt.last_combat = t; me.stats["dmg"] += dmg; tgt.stats["taken"] += dmg
+                            me.stats["zhits"] = me.stats.get("zhits", 0) + 1
+                            tgt.events.append({"type": "damaged", "amount": dmg, "weapon": "lightning", "bearing": inc, "by": me.id, "rear": rear})
+                            me.events.append({"type": "hit", "target": tgt.id, "amount": dmg, "weapon": "lightning", "rear": rear})
             if me.second == "laser":
-                L = cfg["weapons"]["laser"]; me.cool2 -= dt
+                L = me.wcfg["laser"]; me.cool2 -= dt
                 shoot = False
                 if me.charge > 0:
                     me.charge = min(L["charge"], me.charge + dt)
@@ -202,7 +258,7 @@ def game(cmds, cfg, hello, args, seed):
                     if f is not None:
                         inc = math.atan2(-d[1], -d[0]); rear = abs(wrap(inc - tgt.aim[0])) > math.radians(m["front_arc_deg"]) / 2
                         dmg = L["damage"] * frac * (m["rear_mult"] if rear else 1)
-                        tgt.hp -= dmg; tgt.last_combat = t; me.stats["lhits"] += 1; me.stats["ldmg"] += dmg; me.stats["dmg"] += dmg; tgt.stats["taken"] += dmg
+                        dmg *= (1 - tgt.armor); tgt.hp -= dmg; tgt.last_combat = t; me.stats["lhits"] += 1; me.stats["ldmg"] += dmg; me.stats["dmg"] += dmg; tgt.stats["taken"] += dmg
                         tgt.events.append({"type": "damaged", "amount": dmg, "weapon": "laser", "bearing": inc, "by": me.id, "rear": rear})
                         me.events.append({"type": "hit", "target": tgt.id, "amount": dmg, "weapon": "laser", "rear": rear})
                     me.charge = 0.0; me.held_full = 0.0; me.cool2 = L["cooldown"]
@@ -218,14 +274,15 @@ def game(cmds, cfg, hello, args, seed):
             if f is not None:
                 inc = math.atan2(-v[1], -v[0])  # direction the shot came from, as seen by the target
                 rear = abs(wrap(inc - tgt.aim[0])) > math.radians(m["front_arc_deg"]) / 2
-                dmg = g["damage"] * (m["rear_mult"] if rear else 1)
-                tgt.hp -= dmg; tgt.last_combat = t
+                dmg = shooter.wcfg["gun"]["damage"] * (m["rear_mult"] if rear else 1)
+                dmg *= (1 - tgt.armor); tgt.hp -= dmg; tgt.last_combat = t
                 shooter.stats["hits"] += 1; shooter.stats["dmg"] += dmg; shooter.stats["rear"] += rear; tgt.stats["taken"] += dmg
                 tgt.events.append({"type": "damaged", "amount": dmg, "weapon": "gun", "bearing": inc, "by": owner, "rear": rear})
                 shooter.events.append({"type": "hit", "target": tgt.id, "amount": dmg, "weapon": "gun", "rear": rear})
                 continue
-            trav += g["speed"] * dt
-            if trav < g["range"] and q[2] > terrain.at(q[0], q[1]):
+            gs = shooter.wcfg["gun"]
+            trav += gs["speed"] * dt
+            if trav < gs["range"] and q[2] > terrain.at(q[0], q[1]):
                 nb.append([owner, q, v, trav])
         bullets = nb
         t += dt; tick += 1
@@ -237,6 +294,7 @@ def game(cmds, cfg, hello, args, seed):
         try: p.wait(2)
         except subprocess.TimeoutExpired: p.kill()
     winner = None if all(x.hp > 0 for x in mechs) else (0 if mechs[0].hp > 0 else 1)
+    if args.gauntlet: return kills, t, [x.stats for x in mechs], [x.hp for x in mechs], [max(x) if x else 0 for x in think_ms]
     return winner, t, [x.stats for x in mechs], [x.hp for x in mechs], [max(x) if x else 0 for x in think_ms]
 
 
@@ -249,25 +307,39 @@ def main():
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--envA", default="", help="comma-separated BOT_*=value settings for bot A only")
     ap.add_argument("--envB", default="", help="comma-separated BOT_*=value settings for bot B only")
-    ap.add_argument("--weaponA", default="", help="second weapon for A: laser")
-    ap.add_argument("--weaponB", default="", help="second weapon for B: laser")
+    ap.add_argument("--weaponA", default="", help="second weapon for A: laser or lightning")
+    ap.add_argument("--gauntlet", action="store_true", help="B is replaced by a fresh opponent --gap s after each kill, --dist m away; score = kills before A dies")
+    ap.add_argument("--gap", type=float, default=10)
+    ap.add_argument("--weaponB", default="", help="second weapon for B: laser or lightning")
+    ap.add_argument("--upA", default="", help="weapon stat overrides for A, e.g. laser.charge*0.75")
+    ap.add_argument("--upB", default="", help="weapon stat overrides for B")
+    ap.add_argument("--hpA", type=float, default=1.0, help="max HP multiplier for A (plating = 1.15)")
+    ap.add_argument("--armorA", type=float, default=0.0, help="damage reduction for A (armor = 0.08)")
     ap.add_argument("cmds", nargs=2)
     a = ap.parse_args(sys.argv[1:sys.argv.index("--")] + sys.argv[sys.argv.index("--") + 1:]) if "--" in sys.argv else ap.parse_args()
     lines = gzip.open("kit/check/stream.jsonl.gz", "rt").read().splitlines()
     hello = json.loads(lines[0]); hello["map"]["dir"] = a.map; cfg = hello["config"]
     wins = [0, 0, 0]; tot = [dict(shots=0, hits=0, dmg=0.0, rear=0, taken=0.0, spd=0.0, n=0, lshots=0, lhits=0, ldmg=0.0) for _ in range(2)]; times = []
+    if a.gauntlet:
+        ks = []
+        for gi in range(a.games):
+            k, t, st, hp, slow = game(a.cmds, cfg, hello, a, a.seed * 1000 + gi); ks.append(k)
+            print(f"run {gi + 1:2d}: {k} kills, survived {t:5.1f}s, slowest ms A {slow[0]:.0f}")
+        print(f"GAUNTLET kills per run: mean {sum(ks) / len(ks):.2f}  min {min(ks)}  max {max(ks)}")
+        return
     for gi in range(a.games):
         w, t, st, hp, slow = game(a.cmds, cfg, hello, a, a.seed * 1000 + gi)
         wins[2 if w is None else w] += 1; times.append(t)
         for i in range(2):
-            for k in tot[i]: tot[i][k] += st[i][k]
+            for k in st[i]: tot[i][k] = tot[i].get(k, 0) + st[i][k]
         print(f"game {gi + 1:2d}: winner {['A', 'B', 'none'][2 if w is None else w]:4s} at {t:5.1f}s  hp A {max(0, hp[0]):5.0f} B {max(0, hp[1]):5.0f}  "
               f"hit% A {100 * st[0]['hits'] / max(1, st[0]['shots']):4.1f} B {100 * st[1]['hits'] / max(1, st[1]['shots']):4.1f}  slowest ms A {slow[0]:.0f} B {slow[1]:.0f}")
     for i, name in enumerate("AB"):
         s = tot[i]
         print(f"{name} ({a.cmds[i]}): wins {wins[i]}/{a.games}  shots {s['shots']}  hit% {100 * s['hits'] / max(1, s['shots']):.1f}  "
               f"dmg/game {s['dmg'] / a.games:.0f}  rear hits {s['rear']}  taken/game {s['taken'] / a.games:.0f}  avg speed {s['spd'] / max(1, s['n']):.1f} m/s"
-              + (f"  laser shots {s['lshots']} hits {s['lhits']} dmg/game {s['ldmg'] / a.games:.0f}" if s['lshots'] else ""))
+              + (f"  laser shots {s['lshots']} hits {s['lhits']} dmg/game {s['ldmg'] / a.games:.0f}" if s['lshots'] else "")
+              + (f"  lightning shots {s.get('zshots', 0)} hits {s.get('zhits', 0)}" if a.weaponA == "lightning" and name == "A" else ""))
     print(f"draws {wins[2]}  avg length {sum(times) / len(times):.1f}s")
 
 

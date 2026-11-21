@@ -16,13 +16,17 @@ const wrap = (a: number) => ((((a + Math.PI) % TAU) + TAU) % TAU) - Math.PI
 const d2 = (a: number[], b: number[]) => Math.hypot(b[0] - a[0], b[1] - a[1])
 const yawTo = (a: number[], b: number[]) => Math.atan2(b[1] - a[1], b[0] - a[0])
 
-// Upgrade preference: survival first (placement is the score), then gun, then the rest.
+// Upgrade preference without a laser: survival first, then gun, then the rest.
+// (Gauntlet sim: without a laser the order makes no measurable difference.)
 const UPGRADE_ORDER = [
   "plating", "armor", "nanites", "gun_damage", "gun_rate",
   "laser_damage", "laser_charge", "lightning_efficiency", "lightning_range", "mortar_reload",
   "gun_mag", "servos", "gyros", "sensors", "gun_velocity", "capacitor", "reactor", "jets",
   "mortar_splash", "mortar_velocity", "lightning_chain", "laser_pierce",
 ]
+// With a laser, damage first: gauntlet sim (16 runs) kills before death: no upgrade 5.19,
+// laser_damage 8.00, laser_charge 6.00, armor 5.50, plating 5.19.
+const LASER_UPGRADE_ORDER = ["laser_damage", "laser_charge", ...UPGRADE_ORDER.filter((u) => u !== "laser_damage" && u !== "laser_charge")]
 // Weapon preference for the second slot.
 const WEAPON_RANK: Record<string, number> = { laser: 3, lightning: 2, mortar: 1, gun: 0 }
 
@@ -34,12 +38,17 @@ const knob = (name: string, dflt: number) => {
   return Number.isFinite(v) && process.env[`BOT_${name}`] !== undefined ? v : dflt
 }
 const K = {
-  want: knob("WANT", 90), // preferred fight distance, m
+  want: knob("WANT", 90), // preferred fight distance with the gun alone, m
   band: knob("BAND", 30), // no radial movement within want +- band
+  wantLaser: knob("WANT_LASER", 90), // ... when holding a laser (hitscan, 280 m)
+  wantLightning: knob("WANT_LIGHTNING", 90), // ... with lightning (45 m reach). Duel sim: closing in to 20-30 m loses (opponents back off; we take fire chasing)
+  bandLightning: knob("BAND_LIGHTNING", 8),
+  wantMortar: knob("WANT_MORTAR", 120), // ... with a mortar (lobbed, splash hurts us up close)
   radial: knob("RADIAL", 0.8), // weight of closing/opening distance vs sideways
   flipMin: knob("FLIP_MIN", 0.8), // strafe direction lasts flipMin + rand * flipRand s
   flipRand: knob("FLIP_RAND", 1.4),
   flipOnHit: knob("FLIP_ON_HIT", 1), // reverse strafe when hit
+  retreatHp: knob("RETREAT_HP", 0.3), // retreat below this HP fraction if the target is not weaker
   boostFight: knob("BOOST_FIGHT", 40), // boost while strafing when energy is above this (0 = never); duel sim: -30% damage taken
 }
 
@@ -163,8 +172,9 @@ run((hello: Hello) => {
       if (obs.offer) {
         let best = 0
         let bestRank = Infinity
+        const order = me.weapons.some((w) => w?.kind === "laser") ? LASER_UPGRADE_ORDER : UPGRADE_ORDER
         obs.offer.choices.forEach((c, i) => {
-          const r = UPGRADE_ORDER.indexOf(c.id)
+          const r = order.indexOf(c.id)
           const rank = r < 0 ? 99 : r
           if (rank < bestRank) {
             bestRank = rank
@@ -216,7 +226,7 @@ run((hello: Hello) => {
       // Retreat only when it pays: low and the fight is not going our way, or badly outnumbered.
       // Backing away from a single attacker mostly hands it free shots.
       const targetFrac = target && target.hp !== undefined && target.max_hp ? target.hp / target.max_hp : 1
-      const retreat = threatened && ((hpFrac < 0.3 && targetFrac >= hpFrac) || near.length >= 3)
+      const retreat = threatened && ((hpFrac < K.retreatHp && targetFrac >= hpFrac) || near.length >= 3)
       const safeR = obs.zone.next_radius * 0.6
       const insideSafe = (p: number[]) => d2(p, obs.zone.next_center) <= Math.max(safeR, 15)
 
@@ -256,7 +266,11 @@ run((hello: Hello) => {
         }
         const dist = d2(target.pos, pos)
         const toT = yawTo(pos, target.pos)
-        const radial = dist > K.want + K.band ? 1 : dist < K.want - K.band ? -1 : 0
+        // preferred distance depends on what the second slot can reach
+        const kind2 = me.weapons[1]?.kind
+        const want = kind2 === "lightning" ? K.wantLightning : kind2 === "laser" ? K.wantLaser : kind2 === "mortar" ? K.wantMortar : K.want
+        const band = kind2 === "lightning" ? K.bandLightning : K.band
+        const radial = dist > want + band ? 1 : dist < want - band ? -1 : 0
         const side = toT + (strafeSign * Math.PI) / 2
         const mx = Math.cos(side) + radial * Math.cos(toT) * K.radial
         const my = Math.sin(side) + radial * Math.sin(toT) * K.radial

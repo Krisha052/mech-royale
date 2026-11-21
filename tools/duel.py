@@ -48,7 +48,9 @@ class Mech:
         self.move, self.boost, self.fire, self.want_reload = [0.0, 0.0], False, False, False
         self.last_combat = -99.0; self.last_spend = -99.0
         self.events = []; self.seen_until = -99.0
-        self.stats = dict(shots=0, hits=0, dmg=0.0, rear=0, taken=0.0, spd=0.0, n=0)
+        self.stats = dict(shots=0, hits=0, dmg=0.0, rear=0, taken=0.0, spd=0.0, n=0, lshots=0, lhits=0, ldmg=0.0)
+        self.second = None  # "laser" or None
+        self.fire2 = False; self.charge = 0.0; self.held_full = 0.0; self.cool2 = 0.0
 
     def eye(self):
         return [self.pos[0], self.pos[1], self.pos[2] + self.cfg["mech"]["eye_height"]]
@@ -75,7 +77,8 @@ def obs_for(me, other, t, tick, cfg, alive):
         "type": "obs", "tick": tick, "t": round(t, 2), "alive": alive,
         "self": {"id": me.id, "pos": me.pos, "vel": me.vel, "aim": me.aim, "hp": me.hp, "max_hp": me.max_hp,
                  "energy": me.energy, "max_energy": m["energy"], "grounded": True, "cubes": 0, "upgrades": [],
-                 "weapons": [{"kind": "gun", "cooldown": max(0, me.cooldown), "ammo": me.ammo, "reload": max(0, me.reload), "stats": w}, None],
+                 "weapons": [{"kind": "gun", "cooldown": max(0, me.cooldown), "ammo": me.ammo, "reload": max(0, me.reload), "stats": w},
+                             ({"kind": "laser", "cooldown": max(0, me.cool2), "charge": me.charge, "stats": cfg["weapons"]["laser"]} if me.second == "laser" else None)],
                  "in_zone": True, "stats": {k: m[k] for k in ("radius", "height", "eye_height", "muzzle_height", "walk_speed", "boost_speed", "turn_rate", "hp")}},
         "mechs": [], "projectiles": [], "crates": [], "cubes": [], "pickups": [], "sounds": [], "beams": [],
         "events": me.events, "drops": [], "offer": None,
@@ -83,7 +86,7 @@ def obs_for(me, other, t, tick, cfg, alive):
     }
     if other.hp > 0 and sees(me, other, t, cfg):
         o["mechs"].append({"id": other.id, "kind": "mech", "pos": other.pos, "vel": other.vel, "aim": other.aim,
-                           "hp": other.hp, "max_hp": other.max_hp, "cubes": 0, "weapons": ["gun"], "charging": False})
+                           "hp": other.hp, "max_hp": other.max_hp, "cubes": 0, "weapons": ["gun"] + ([other.second] if other.second else []), "charging": other.charge > 0})
     me.events = []
     return o
 
@@ -118,6 +121,7 @@ def game(cmds, cfg, hello, args, seed):
         side = -1 if i == 0 else 1
         x = CX + math.cos(a0) * side * args.dist / 2; y = CY + math.sin(a0) * side * args.dist / 2
         mechs.append(Mech(i, [x, y, terrain.at(x, y)], rnd.uniform(-math.pi, math.pi), cfg))
+        mechs[-1].second = (args.weaponA, args.weaponB)[i] or None
     for i, p in enumerate(procs):
         h = dict(hello); h["slot"] = i; h["seed"] = rnd.randrange(1, 2**31)
         p.stdin.write(json.dumps(h) + "\n"); p.stdin.flush(); p.stdout.readline()
@@ -134,7 +138,8 @@ def game(cmds, cfg, hello, args, seed):
                 mv = a.get("move", [0, 0]); L = math.hypot(*mv)
                 me.move = [mv[0] / L, mv[1] / L] if L > 1 else list(mv)
                 me.boost = bool(a.get("boost")); me.cmd_aim = list(a.get("aim", me.cmd_aim))
-                me.fire = bool((a.get("fire") or [False])[0]); me.want_reload = bool(a.get("reload"))
+                fr = a.get("fire") or [False, False]
+                me.fire = bool(fr[0]); me.fire2 = bool(fr[1]) if len(fr) > 1 else False; me.want_reload = bool(a.get("reload"))
         for me in mechs:
             # aim slews
             dy = wrap(me.cmd_aim[0] - me.aim[0]); step = m["turn_rate"] * dt
@@ -143,7 +148,7 @@ def game(cmds, cfg, hello, args, seed):
             me.aim[1] += max(-ps, min(ps, dp))
             # movement
             boosting = me.boost and me.energy > 0 and math.hypot(*me.move) > 0.1
-            spd = m["boost_speed"] if boosting else m["walk_speed"]
+            spd = (m["boost_speed"] if boosting else m["walk_speed"]) * (m["charge_move_mult"] if me.charge > 0 else 1)
             if boosting:
                 me.energy = max(0, me.energy - m["boost_drain"] * dt); me.last_spend = t
             elif t - me.last_spend > m["energy_regen_delay"]:
@@ -171,6 +176,36 @@ def game(cmds, cfg, hello, args, seed):
                 bullets.append([me.id, start, [d[0] * g["speed"], d[1] * g["speed"], d[2] * g["speed"]], 0.0])
                 me.cooldown = g["cooldown"]; me.ammo -= 1; me.stats["shots"] += 1; me.last_combat = t
                 if me.ammo == 0: me.reload = g["reload"]
+            # laser: hold to charge, release (or held full for hold_s) to fire a hitscan beam
+            if me.second == "laser":
+                L = cfg["weapons"]["laser"]; me.cool2 -= dt
+                shoot = False
+                if me.charge > 0:
+                    me.charge = min(L["charge"], me.charge + dt)
+                    if me.charge >= L["charge"]: me.held_full += dt
+                    if (not me.fire2 and me.charge >= L["min_charge"]) or me.held_full >= L["hold_s"]: shoot = True
+                elif me.fire2 and me.cool2 <= 0:
+                    me.charge = dt
+                if shoot:
+                    frac = L["min_frac"] + (1 - L["min_frac"]) * min(1, me.charge / L["charge"])
+                    yaw, pit = me.aim
+                    d = [math.cos(pit) * math.cos(yaw), math.cos(pit) * math.sin(yaw), math.sin(pit)]
+                    o = [me.pos[0], me.pos[1], me.pos[2] + m["muzzle_height"]]
+                    end = [o[0] + d[0] * L["range"], o[1] + d[1] * L["range"], o[2] + d[2] * L["range"]]
+                    tgt = mechs[1 - me.id]; me.stats["lshots"] += 1; me.last_combat = t
+                    f = None
+                    for sgm in range(56):  # 5 m pieces
+                        a0 = [o[k] + (end[k] - o[k]) * sgm / 56 for k in range(3)]; a1 = [o[k] + (end[k] - o[k]) * (sgm + 1) / 56 for k in range(3)]
+                        if a0[2] < terrain.at(a0[0], a0[1]): break
+                        f = hit_test(a0, a1, tgt, cfg) if tgt.hp > 0 else None
+                        if f is not None: break
+                    if f is not None:
+                        inc = math.atan2(-d[1], -d[0]); rear = abs(wrap(inc - tgt.aim[0])) > math.radians(m["front_arc_deg"]) / 2
+                        dmg = L["damage"] * frac * (m["rear_mult"] if rear else 1)
+                        tgt.hp -= dmg; tgt.last_combat = t; me.stats["lhits"] += 1; me.stats["ldmg"] += dmg; me.stats["dmg"] += dmg; tgt.stats["taken"] += dmg
+                        tgt.events.append({"type": "damaged", "amount": dmg, "weapon": "laser", "bearing": inc, "by": me.id, "rear": rear})
+                        me.events.append({"type": "hit", "target": tgt.id, "amount": dmg, "weapon": "laser", "rear": rear})
+                    me.charge = 0.0; me.held_full = 0.0; me.cool2 = L["cooldown"]
             # regen
             if t - me.last_combat > m["regen_delay"]:
                 me.hp = min(me.max_hp, me.hp + m["regen_per_s"] * dt)
@@ -214,11 +249,13 @@ def main():
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--envA", default="", help="comma-separated BOT_*=value settings for bot A only")
     ap.add_argument("--envB", default="", help="comma-separated BOT_*=value settings for bot B only")
+    ap.add_argument("--weaponA", default="", help="second weapon for A: laser")
+    ap.add_argument("--weaponB", default="", help="second weapon for B: laser")
     ap.add_argument("cmds", nargs=2)
     a = ap.parse_args(sys.argv[1:sys.argv.index("--")] + sys.argv[sys.argv.index("--") + 1:]) if "--" in sys.argv else ap.parse_args()
     lines = gzip.open("kit/check/stream.jsonl.gz", "rt").read().splitlines()
     hello = json.loads(lines[0]); hello["map"]["dir"] = a.map; cfg = hello["config"]
-    wins = [0, 0, 0]; tot = [dict(shots=0, hits=0, dmg=0.0, rear=0, taken=0.0, spd=0.0, n=0) for _ in range(2)]; times = []
+    wins = [0, 0, 0]; tot = [dict(shots=0, hits=0, dmg=0.0, rear=0, taken=0.0, spd=0.0, n=0, lshots=0, lhits=0, ldmg=0.0) for _ in range(2)]; times = []
     for gi in range(a.games):
         w, t, st, hp, slow = game(a.cmds, cfg, hello, a, a.seed * 1000 + gi)
         wins[2 if w is None else w] += 1; times.append(t)
@@ -229,7 +266,8 @@ def main():
     for i, name in enumerate("AB"):
         s = tot[i]
         print(f"{name} ({a.cmds[i]}): wins {wins[i]}/{a.games}  shots {s['shots']}  hit% {100 * s['hits'] / max(1, s['shots']):.1f}  "
-              f"dmg/game {s['dmg'] / a.games:.0f}  rear hits {s['rear']}  taken/game {s['taken'] / a.games:.0f}  avg speed {s['spd'] / max(1, s['n']):.1f} m/s")
+              f"dmg/game {s['dmg'] / a.games:.0f}  rear hits {s['rear']}  taken/game {s['taken'] / a.games:.0f}  avg speed {s['spd'] / max(1, s['n']):.1f} m/s"
+              + (f"  laser shots {s['lshots']} hits {s['lhits']} dmg/game {s['ldmg'] / a.games:.0f}" if s['lshots'] else ""))
     print(f"draws {wins[2]}  avg length {sum(times) / len(times):.1f}s")
 
 

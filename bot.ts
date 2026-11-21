@@ -69,6 +69,8 @@ run((hello: Hello) => {
   let nextStrafeFlip = 0
   let lastThreat: Threat | null = null
   let scanYaw = 0
+  // Weapons on the ground never despawn: remember every one we have seen.
+  const knownPickups = new Map<number, { kind: string; pos: Vec3 }>()
 
   function planTo(me: Vec3, goal: P2, tick: number) {
     const moved = !pathGoal || d2(pathGoal, goal) > 6
@@ -172,6 +174,15 @@ run((hello: Hello) => {
         act.pick = best
       }
 
+      // ---- weapon memory ----
+      for (const p of obs.pickups) knownPickups.set(p.id, { kind: p.kind, pos: p.pos })
+      const seenIds = new Set(obs.pickups.map((p) => p.id))
+      for (const [id, p] of knownPickups) {
+        // close enough that our proximity sensors would show it, but it is gone: someone took it
+        if (!seenIds.has(id) && d2(p.pos, pos) < 35) knownPickups.delete(id)
+      }
+      for (const e of obs.events) if (e.type === "take_failed" && e.reason !== "range" && e.reason !== "busy") knownPickups.delete(e.id)
+
       // ---- what we see ----
       const mechs = obs.mechs.filter((m) => m.kind === "mech")
       const npcs = obs.mechs.filter((m) => m.kind === "npc")
@@ -256,9 +267,26 @@ run((hello: Hello) => {
         const inReach = (p: number[], r: number) => d2(p, pos) < r && insideSafe(p)
         const cube = obs.cubes.filter((c) => inReach(c.pos, 70)).sort((a, b) => d2(a.pos, pos) - d2(b.pos, pos))[0]
         const want2 = !me.weapons[1]
-        const pick = obs.pickups
-          .filter((p) => inReach(p.pos, 80) && (want2 || WEAPON_RANK[p.kind] > WEAPON_RANK[me.weapons[1]!.kind]) && !me.weapons.some((w) => w?.kind === p.kind))
-          .sort((a, b) => d2(a.pos, pos) - WEAPON_RANK[a.kind] * 20 - (d2(b.pos, pos) - WEAPON_RANK[b.kind] * 20))[0]
+        // Any remembered weapon better than what we hold. A laser is worth a long walk (duel sim:
+        // gun + laser wins 6/6 against gun only), the others less so. Roof pickups are skipped:
+        // the walk grid is ground-only.
+        const reachKm = (kind: string) => (kind === "laser" ? 250 : 100)
+        let pick: { id: number; kind: string; pos: Vec3 } | undefined
+        let pickCost = Infinity
+        for (const [id, p] of knownPickups) {
+          const better = want2 || WEAPON_RANK[p.kind] > WEAPON_RANK[me.weapons[1]!.kind]
+          if (!better || me.weapons.some((w) => w?.kind === p.kind)) continue
+          if (p.pos[2] > world.groundAt(p.pos[0], p.pos[1]) + 3) continue
+          const dist = d2(p.pos, pos)
+          // outside the safe circle is fine while there is time to come back afterwards
+          const detour = (dist / (me.stats.walk_speed ?? cfg.mech.walk_speed)) * 2
+          if (dist > reachKm(p.kind) || (!insideSafe(p.pos) && slack - detour < 20) || (dist > 80 && slack < 25)) continue
+          const cost = dist - WEAPON_RANK[p.kind] * 40
+          if (cost < pickCost) {
+            pickCost = cost
+            pick = { id, ...p }
+          }
+        }
         const drop = (obs.drops ?? []).find((d) => d.lands_in <= 3 && inReach(d.pos, 90) && hpFrac > 0.3)
         if (cube) {
           goal = [cube.pos[0], cube.pos[1]]
@@ -328,7 +356,15 @@ run((hello: Hello) => {
           }
         } else {
           const speed = gun?.stats.speed ?? cfg.weapons.gun.speed
-          const lp = leadPoint(muzzle, shootAt, speed)
+          const laser = second?.kind === "laser" && shootAt.kind === "mech" ? second : null
+          const laserFull = laser ? (laser.stats.charge ?? cfg.weapons.laser.charge) : 0
+          const laserCharge = laser?.charge ?? 0
+          // The laser is hitscan: once it is nearly charged, aim at where the target is (plus one
+          // decision of travel), not at the gun's bullet lead point, which is metres ahead.
+          const c = center(shootAt)
+          const lp: Vec3 = laser && laserCharge >= laserFull * 0.6
+            ? [c[0] + shootAt.vel[0] * 0.1, c[1] + shootAt.vel[1] * 0.1, c[2]]
+            : leadPoint(muzzle, shootAt, speed)
           aimYaw = yawTo(pos, lp)
           aimPitch = Math.atan2(lp[2] - muzzle[2], d2(lp, pos))
           const tol = Math.atan2(cfg.mech.radius * 0.8, Math.max(dist, 1)) + 0.01
@@ -339,11 +375,16 @@ run((hello: Hello) => {
             if ((gun.ammo ?? 1) > 0 && (gun.reload ?? 0) <= 0) fire[0] = true
           }
           if (second?.kind === "lightning" && clear && dist < (second.stats.range ?? 45) - 2 && Math.abs(wrap(me.aim[0] - aimYaw)) < 0.2 && me.energy > 10) fire[1] = true
-          if (second?.kind === "laser" && clear && dist < (second.stats.range ?? 280) - 10 && shootAt.kind === "mech") {
-            const full = second.stats.charge ?? cfg.weapons.laser.charge
-            const charging = (second.charge ?? 0) > 0
-            if (second.cooldown <= 0 && (!charging || (second.charge ?? 0) < full * 0.97 || err > tol)) fire[1] = true
-            // releasing (fire[1] = false) once fully charged and on target fires the beam
+          if (laser) {
+            const inRange = dist < (laser.stats.range ?? 280) - 10
+            if (laserCharge > 0) {
+              // keep holding until fully charged, the shot is clear and the torso is on target;
+              // letting go fires the beam (a full charge also fires on its own after hold_s)
+              const ready = laserCharge >= laserFull * 0.97 && clear && inRange && err < tol
+              fire[1] = !ready
+            } else if (laser.cooldown <= 0 && clear && inRange) {
+              fire[1] = true
+            }
           }
         }
       } else if (crate) {
@@ -355,9 +396,10 @@ run((hello: Hello) => {
         // turn toward an unseen attacker: protects the rear and brings it into view
         aimYaw = lastThreat.bearing
       } else {
-        // look where we are going, sweeping a little to see more
-        scanYaw = Math.sin(t * 0.9) * 0.6
-        aimYaw = nav.yaw + scanYaw
+        // nothing to shoot: sweep the whole circle to spot weapons, cubes and enemies
+        // (vision is a 120 deg wedge out to 200 m; proximity sensors only reach 45 m)
+        scanYaw = wrap(scanYaw + 0.12)
+        aimYaw = scanYaw
       }
       // reload while nothing to shoot
       if (gun && !shootAt && (gun.ammo ?? 12) < (gun.stats.mag ?? 12) * 0.5 && (gun.reload ?? 0) <= 0) act.reload = true

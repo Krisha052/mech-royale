@@ -54,6 +54,18 @@ const K = {
   flipOnHit: knob("FLIP_ON_HIT", 1), // reverse strafe when hit
   retreatHp: knob("RETREAT_HP", 0.3), // retreat below this HP fraction if the target is not weaker
   retreatN: knob("RETREAT_N", 3), // retreat when this many enemies are within 120 m
+  fightPos: knob("FIGHT_POS", 0), // with 2+ enemies around, pick spots that keep our target in sight and hide us from the others
+  fightPosEvery: knob("FIGHT_POS_EVERY", 5), // decisions between spot choices
+  // Farming power cubes (+4% max HP and damage each, up to 10; upgrade offers at 1, 3, 6, 10).
+  // Arena sim with a cube head start: 0 cubes 2.85 kills, 6 cubes 3.55, 10 cubes 4.95.
+  farm: knob("FARM", 1), // in free time, go and shoot drones and ground crates for cubes (arena: 2.17 -> 2.73 kills, cubes at death 3.0 -> 6.1)
+  farmUntil: knob("FARM_UNTIL", 300), // match time after which we stop farming, s
+  farmRange: knob("FARM_RANGE", 150), // how far we walk for a drone or crate, m
+  farmMinHp: knob("FARM_MIN_HP", 0.7), // do not farm below this HP fraction
+  npcStandoff: knob("NPC_STANDOFF", 70), // shoot drones from here (their aggro range is 45 m)
+  cubeRange: knob("CUBE_RANGE", 150), // walk this far for a visible cube
+  shootNpc: knob("SHOOT_NPC", 1), // shoot drones we happen to pass (when not farming)
+  shootCrate: knob("SHOOT_CRATE", 1), // shoot crates we happen to pass (when not farming)
   dodge: knob("DODGE", 1), // move away from where an incoming mortar shell will land (arena: 0.93 -> 1.23 vs mortar hunters)
   dodgeMargin: knob("DODGE_MARGIN", 2), // extra metres beyond splash + our radius
   recoverHp: knob("RECOVER_HP", 0), // between fights: below this HP fraction, stay out of sight to regen (0 = off)
@@ -92,8 +104,13 @@ run((hello: Hello) => {
   let lastThreat: Threat | null = null
   let scanYaw = 0
   let recovering = false
+  let fightSpot: P2 | null = null
+  let fightSpotTick = -999
   // Weapons on the ground never despawn: remember every one we have seen.
   const knownPickups = new Map<number, { kind: string; pos: Vec3 }>()
+  // drones and crates we have seen (crates never move; drones stay near home)
+  const knownNpcs = new Map<number, Vec3>()
+  const knownCrates = new Map<number, Vec3>()
   // roof pickups we failed to reach: not retried
   const skipPickup = new Set<number>()
   let climbFor: { id: number; since: number } | null = null
@@ -220,6 +237,13 @@ run((hello: Hello) => {
       }
       for (const e of obs.events) if (e.type === "take_failed" && e.reason !== "range" && e.reason !== "busy") knownPickups.delete(e.id)
 
+      // ---- drone and crate memory ----
+      for (const m of obs.mechs) if (m.kind === "npc") knownNpcs.set(m.id, m.pos)
+      for (const c of obs.crates) knownCrates.set(c.id, c.pos)
+      const seenNow = new Set([...obs.mechs.map((m) => m.id), ...obs.crates.map((c) => c.id)])
+      for (const [id, p] of knownNpcs) if (!seenNow.has(id) && d2(p, pos) < 35) knownNpcs.delete(id)
+      for (const [id, p] of knownCrates) if (!seenNow.has(id) && d2(p, pos) < 30) knownCrates.delete(id)
+
       // ---- what we see ----
       const mechs = obs.mechs.filter((m) => m.kind === "mech")
       const npcs = obs.mechs.filter((m) => m.kind === "npc")
@@ -241,6 +265,27 @@ run((hello: Hello) => {
           targetClear = c
         }
         if (c) break
+      }
+
+      /** Nearest remembered drone or ground crate worth farming. */
+      const farmTarget = (inReach: (p: number[], r: number) => boolean) => {
+        let best: { pos: Vec3; npc: boolean } | null = null
+        let bestD = Infinity
+        for (const p of knownNpcs.values()) {
+          const dd = d2(p, pos)
+          if (dd < bestD && inReach(p, K.farmRange)) {
+            bestD = dd
+            best = { pos: p, npc: true }
+          }
+        }
+        for (const p of knownCrates.values()) {
+          const dd = d2(p, pos) + 20 // drones give 2 cubes, crates 1
+          if (dd < bestD && inReach(p, K.farmRange) && p[2] <= world.groundAt(p[0], p[1]) + 3) {
+            bestD = dd
+            best = { pos: p, npc: false }
+          }
+        }
+        return best
       }
 
       // ---- movement goal ----
@@ -315,10 +360,39 @@ run((hello: Hello) => {
         const my = Math.sin(side) + radial * Math.sin(toT) * K.radial
         const p: P2 = [pos[0] + mx * 12, pos[1] + my * 12]
         goal = insideSafe(p) ? p : anchor
+        // Several enemies: the arena sim shows we lose when two or more shoot at once. Choose a
+        // nearby spot from which we can still shoot our target but the others cannot see us.
+        const others = mechs.filter((m) => m.id !== target!.id && d2(m.pos, pos) < 250)
+        if (K.fightPos > 0 && others.length >= 1 && !light) {
+          if (!fightSpot || tick - fightSpotTick >= K.fightPosEvery * cfg.match.decide_every || d2(pos, fightSpot) < 2) {
+            const tc = center(target!)
+            let bestScore = -Infinity
+            let best: P2 | null = null
+            for (let k = 0; k < 12; k++) {
+              const a = (k / 12) * TAU + rand() * 0.3
+              for (const r of [8, 16]) {
+                const c: P2 = [pos[0] + Math.cos(a) * r, pos[1] + Math.sin(a) * r]
+                const [gi, gj] = world.navOf(c[0], c[1])
+                if (!world.walkable(gi, gj) || !insideSafe(c)) continue
+                const gz = world.groundAt(c[0], c[1])
+                let score = -r * 0.15 - Math.abs(d2(c, target!.pos) - want) * 0.15 + rand() * 4
+                if (world.clear([c[0], c[1], gz + 7], tc, 2)) score += 40
+                for (const o of others.slice(0, 3)) if (world.clear([o.pos[0], o.pos[1], o.pos[2] + 8], [c[0], c[1], gz + 6], 2)) score -= 30
+                if (score > bestScore) {
+                  bestScore = score
+                  best = c
+                }
+              }
+            }
+            fightSpot = best
+            fightSpotTick = tick
+          }
+          if (fightSpot) goal = fightSpot
+        } else fightSpot = null
       } else {
         // free time: loot inside the safe area
         const inReach = (p: number[], r: number) => d2(p, pos) < r && insideSafe(p)
-        const cube = obs.cubes.filter((c) => inReach(c.pos, 70)).sort((a, b) => d2(a.pos, pos) - d2(b.pos, pos))[0]
+        const cube = obs.cubes.filter((c) => inReach(c.pos, K.cubeRange)).sort((a, b) => d2(a.pos, pos) - d2(b.pos, pos))[0]
         const want2 = !me.weapons[1]
         // Any remembered weapon better than what we hold. A laser is worth a long walk (duel sim:
         // gun + laser wins 6/6 against gun only), the others less so. Roof pickups count if the
@@ -335,7 +409,6 @@ run((hello: Hello) => {
           // outside the safe circle is fine while there is time to come back afterwards
           const detour = (dist / (me.stats.walk_speed ?? cfg.mech.walk_speed)) * 2
           if (dist > reachKm(p.kind) || (!insideSafe(p.pos) && slack - detour < 20) || (dist > 80 && slack < 25)) continue
-          // metres of walking each kind is worth: the sim says a laser is worth far more than the rest
           // metres of walking each kind is worth: house bots grab weapons within seconds, and in the
           // arena sim a mortar is nearly as good as a laser, so take whichever of the two is closer
           const cost = dist - (p.kind === "laser" ? 150 : p.kind === "mortar" ? 120 : 10)
@@ -356,6 +429,16 @@ run((hello: Hello) => {
             act.take = pick.id
             if (!want2) act.drop = 1
           }
+        } else if (K.farm > 0 && t < K.farmUntil && hpFrac > K.farmMinHp && farmTarget(inReach)) {
+          const f = farmTarget(inReach)!
+          // stand off: drones from beyond their aggro range, crates from close enough to hit
+          const stand = f.npc ? K.npcStandoff : 30
+          const dd = d2(f.pos, pos)
+          if (dd > stand) {
+            const back = yawTo(f.pos, pos)
+            goal = [f.pos[0] + Math.cos(back) * stand, f.pos[1] + Math.sin(back) * stand]
+          } else goal = [pos[0], pos[1]]
+          mode = f.npc ? "farm drone" : "farm crate"
         } else if (drop) {
           goal = [drop.pos[0], drop.pos[1]]
           mode = "drop"
@@ -462,8 +545,11 @@ run((hello: Hello) => {
       let aimPitch = 0
       const fire: [boolean, boolean] = [false, false]
 
-      const crate = !target ? obs.crates.filter((c) => d2(c.pos, pos) < 60 && world.clear(muzzle, [c.pos[0], c.pos[1], c.pos[2] + 1.2], 1.5)).sort((a, b) => d2(a.pos, pos) - d2(b.pos, pos))[0] : undefined
-      const npc = !target && hpFrac > 0.6 && t < 330 ? npcs.filter((n) => d2(n.pos, pos) < 70 && shootable(n)).sort((a, b) => d2(a.pos, pos) - d2(b.pos, pos))[0] : undefined
+      const farming = K.farm > 0 && t < K.farmUntil && hpFrac > K.farmMinHp
+      const crateRange = farming ? 100 : K.shootCrate > 0 ? 60 : 0
+      const npcRange = farming ? 130 : K.shootNpc > 0 && hpFrac > 0.6 && t < 330 ? 70 : 0
+      const crate = !target ? obs.crates.filter((c) => d2(c.pos, pos) < crateRange && world.clear(muzzle, [c.pos[0], c.pos[1], c.pos[2] + 1.2], 1.5)).sort((a, b) => d2(a.pos, pos) - d2(b.pos, pos))[0] : undefined
+      const npc = !target ? npcs.filter((n) => d2(n.pos, pos) < npcRange && shootable(n)).sort((a, b) => d2(a.pos, pos) - d2(b.pos, pos))[0] : undefined
       const shootAt: ActorObs | null = target ?? npc ?? null
 
       if (shootAt) {

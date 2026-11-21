@@ -32,6 +32,7 @@ const BOT = opt("bot", "bot.ts")
 const ENV = opt("env", "") // comma-separated BOT_*=v for our bot
 const VERBOSE = argv.includes("--verbose")
 const CUBES_A = Number(opt("cubes", "0")) // our starting power cubes: +4% max HP and damage each (up to 10)
+const DROPS = !argv.includes("--no-drops") // supply drops: stand in the ring alone for capture_s -> cubes + full repair
 const FARM = !argv.includes("--no-farm") // drones, crates, power cubes and upgrade offers
 const PICKUPS = !argv.includes("--no-pickups") // floor weapons and hunter death drops (protocol §7 Weapon loot)
 const HUNTER_MORTAR = Number(opt("hunter-mortar", "0.5")) // fraction of hunters carrying a mortar (when --hunter-weapon is not given)
@@ -296,7 +297,7 @@ function hunterThink(h: Mech, A: Mech, t: number) {
 }
 
 // ---------- one run ----------
-type Result = { cubes: number; upgrades: string[]; dealtBy: Record<string, number>; shotsBy: Record<string, number>; takenBy: Record<string, number>; activeAtDeath: number; mortarAtDeath: number; hpAtFightStart: number[]; kills: number; time: number; taken: number; aHit: number; hHit: number; aShots: number; hShots: number; slowest: number; armedAt: number | null; armedWith: string }
+type Result = { dropsCaptured: number; cubes: number; upgrades: string[]; dealtBy: Record<string, number>; shotsBy: Record<string, number>; takenBy: Record<string, number>; activeAtDeath: number; mortarAtDeath: number; hpAtFightStart: number[]; kills: number; time: number; taken: number; aHit: number; hHit: number; aShots: number; hShots: number; slowest: number; armedAt: number | null; armedWith: string }
 
 async function run(runSeed: number): Promise<Result> {
   seed = runSeed
@@ -415,6 +416,16 @@ async function run(runSeed: number): Promise<Result> {
     A.dmgMult = 1 + cfg.cubes.damage_per_cube * c
   }
   applyCubes()
+  const gainCubes = (n: number, t: number) => {
+    for (let i = 0; i < n; i++) {
+      A.cubes++
+      applyCubes()
+      if ((cfg.cubes.upgrade_thresholds as number[]).includes(A.cubes)) makeOffer(t)
+    }
+  }
+  type Drop = { id: number; pos: number[]; callT: number; landT: number; progress: number; holder: number | null; taken: boolean }
+  const drops: Drop[] = []
+  let dropsCaptured = 0
   const offers: { id: number; expires: number; choices: { id: string; name: string; desc: string }[] }[] = []
   let offerId = 1
   const makeOffer = (t: number) => {
@@ -503,7 +514,8 @@ async function run(runSeed: number): Promise<Result> {
           const inView = d <= cfg.vision.near_range || (d <= cfg.vision.range && Math.abs(wrap(Math.atan2(p.pos[1] - A.pos[1], p.pos[0] - A.pos[0]) - A.aim[0])) <= (cfg.vision.fov_deg * Math.PI) / 360)
           return inView && world.clear(A.eye(), [p.pos[0], p.pos[1], p.pos[2] + 1], 2)
         }).map((p) => ({ id: p.id, kind: p.kind, pos: [...p.pos] })),
-        sounds: [], beams: [], events: A.events, drops: [], offer, zone,
+        sounds: [], beams: [], events: A.events, offer, zone,
+        drops: drops.filter((d) => !d.taken).map((d) => ({ id: d.id, pos: [...d.pos], radius: cfg.drops.radius, lands_in: Math.max(0, d.landT - t), capture_s: cfg.drops.capture_s, progress: d.progress, holder: d.holder })),
       })
       A.events = []
       const t0 = performance.now()
@@ -739,14 +751,41 @@ async function run(runSeed: number): Promise<Result> {
         dropCubes(c.pos, cfg.crates.cubes)
         if (PICKUPS && rand() < cfg.loot.crate_weapon_chance) pickups.push({ id: pickupId++, kind: (["mortar", "laser", "lightning"] as Weapon2[])[Math.floor(rand() * 3)], pos: [...c.pos] })
       }
+    if (DROPS && cfg.drops) {
+      for (const callT of cfg.drops.times as number[])
+        if (t >= callT && !drops.some((d) => d.callT === callT)) {
+          const [x, y] = pick(ax, ay, 0, 250)
+          drops.push({ id: 20000 + drops.length, pos: [x, y, world.groundAt(x, y)], callT, landT: callT + cfg.drops.fall_s, progress: 0, holder: null, taken: false })
+        }
+      for (const d of drops) {
+        if (d.taken || t < d.landT) continue
+        const inRing = (m: Mech) => m.hp > 0 && hyp2(m.pos, d.pos) <= cfg.drops.radius
+        const hunterIn = hunters.some(inRing)
+        if (inRing(A) && !hunterIn) {
+          if (d.holder !== 0) d.progress = 0
+          d.holder = 0
+          d.progress += dt
+          if (d.progress >= cfg.drops.capture_s) {
+            d.taken = true
+            dropsCaptured++
+            gainCubes(cfg.drops.cubes, t)
+            A.hp = A.maxHp
+            A.energy = M.energy
+            A.events.push({ type: "drop", id: d.id, cubes: A.cubes })
+            if (VERBOSE) console.log(`  t=${t.toFixed(1)} captured drop ${d.id}`)
+          }
+        } else if (!inRing(A) && !hunterIn) {
+          d.progress = 0
+          d.holder = null
+        }
+      }
+    }
     for (let i = cubes.length - 1; i >= 0; i--) {
       const c = cubes[i]
       if (hyp2(c.pos, A.pos) <= cfg.cubes.pickup_radius && Math.abs(c.pos[2] - A.pos[2]) <= 4) {
         cubes.splice(i, 1)
-        A.cubes++
-        applyCubes()
+        gainCubes(1, t)
         A.events.push({ type: "pickup", cubes: A.cubes })
-        if ((cfg.cubes.upgrade_thresholds as number[]).includes(A.cubes)) makeOffer(t)
       }
     }
     t += dt
@@ -757,7 +796,7 @@ async function run(runSeed: number): Promise<Result> {
   const hShots = hunters.reduce((a, h) => a + h.shots, 0)
   const hHits = hunters.reduce((a, h) => a + h.hits, 0)
   const activeH = hunters.filter((h) => h.hp > 0)
-  return { cubes: A.cubes, upgrades: A.upgrades, dealtBy: A.dealtBy, shotsBy: A.shotsBy, takenBy: A.takenBy, activeAtDeath: A.hp <= 0 ? activeH.length : -1, mortarAtDeath: activeH.filter((h) => h.second === "mortar").length, hpAtFightStart: [], kills, time: t, taken: A.taken, aHit: A.hits / Math.max(1, A.shots), hHit: hHits / Math.max(1, hShots), aShots: A.shots, hShots, slowest, armedAt, armedWith: A.second }
+  return { dropsCaptured, cubes: A.cubes, upgrades: A.upgrades, dealtBy: A.dealtBy, shotsBy: A.shotsBy, takenBy: A.takenBy, activeAtDeath: A.hp <= 0 ? activeH.length : -1, mortarAtDeath: activeH.filter((h) => h.second === "mortar").length, hpAtFightStart: [], kills, time: t, taken: A.taken, aHit: A.hits / Math.max(1, A.shots), hHit: hHits / Math.max(1, hShots), aShots: A.shots, hShots, slowest, armedAt, armedWith: A.second }
 }
 
 const results: Result[] = []
@@ -780,6 +819,7 @@ const deaths = results.filter((r) => r.activeAtDeath >= 0)
 const act: Record<number, number> = {}
 for (const r of deaths) act[r.activeAtDeath] = (act[r.activeAtDeath] ?? 0) + 1
 console.log(`damage taken per run by weapon: ${JSON.stringify(Object.fromEntries(Object.entries(tb).map(([k, v]) => [k, Math.round(v)])))}; hunters alive when we died: ${JSON.stringify(act)}`)
+console.log(`supply drops captured per run: ${(results.reduce((a, r) => a + r.dropsCaptured, 0) / results.length).toFixed(2)}; alive at 95 s (first drop lands): ${results.filter((r) => r.time > 95).length}/${results.length}`)
 console.log(`cubes at death: mean ${(results.reduce((a, r) => a + r.cubes, 0) / results.length).toFixed(1)}; upgrades per run ${(results.reduce((a, r) => a + r.upgrades.length, 0) / results.length).toFixed(1)}`)
 const armed = results.filter((r) => r.armedAt !== null)
 console.log(`armed (laser or mortar) in ${armed.length}/${results.length} runs, median at ${armed.length ? armed.map((r) => r.armedAt!).sort((a, b) => a - b)[Math.floor(armed.length / 2)].toFixed(0) : "-"} s; holding at death: ${JSON.stringify(results.reduce((c: Record<string, number>, r) => ((c[r.armedWith || "none"] = (c[r.armedWith || "none"] ?? 0) + 1), c), {}))}`)

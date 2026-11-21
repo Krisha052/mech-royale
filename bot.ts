@@ -69,6 +69,15 @@ const K = {
   grabInFight: knob("GRAB_IN_FIGHT", 80), // unarmed in a fight: move to a known laser/mortar within this many m (0 = off). Arena: armed 63% -> 92% of runs, kills 2.21 -> 2.60
   explore: knob("EXPLORE", 1), // unarmed and no weapon known: walk to unexplored ground to find one
   exploreUntil: knob("EXPLORE_UNTIL", 240), // stop exploring after this match time, s
+  targetHpW: knob("TARGET_HP_W", 0.05), // target ranking = distance + hp * this (higher: finish wounded ones first)
+  upgMode: knob("UPG_MODE", 0), // 0: laser damage first when holding a laser; 1 plating first; 2 armor first; 3 nanites first
+  // Kite with a laser: hold a long distance (their accuracy falls with range, our led shots do
+  // not) and back off firmly, boosting, when they close in. Vision ends at 200 m (+25 with sensors).
+  kite: knob("KITE", 0),
+  kiteDist: knob("KITE_DIST", 190),
+  kiteBand: knob("KITE_BAND", 10),
+  kiteRadial: knob("KITE_RADIAL", 2), // weight of backing off vs strafing
+  kiteBoost: knob("KITE_BOOST", 15), // boost while backing off if energy is above this
   dodge: knob("DODGE", 1), // move away from where an incoming mortar shell will land (arena: 0.93 -> 1.23 vs mortar hunters)
   dodgeMargin: knob("DODGE_MARGIN", 2), // extra metres beyond splash + our radius
   recoverHp: knob("RECOVER_HP", 0), // between fights: below this HP fraction, stay out of sight to regen (0 = off)
@@ -223,7 +232,9 @@ run((hello: Hello) => {
       if (obs.offer) {
         let best = 0
         let bestRank = Infinity
-        const order = me.weapons.some((w) => w?.kind === "laser") ? LASER_UPGRADE_ORDER : UPGRADE_ORDER
+        const first = ["", "plating", "armor", "nanites"][K.upgMode] ?? ""
+        const base = me.weapons.some((w) => w?.kind === "laser") && K.upgMode === 0 ? LASER_UPGRADE_ORDER : UPGRADE_ORDER
+        const order = first ? [first, ...base.filter((u) => u !== first)] : base
         obs.offer.choices.forEach((c, i) => {
           const r = order.indexOf(c.id)
           const rank = r < 0 ? 99 : r
@@ -266,7 +277,7 @@ run((hello: Hello) => {
       let target: ActorObs | null = null
       let targetClear = false
       const attacker = lastThreat && t - lastThreat.t < 3 ? mechs.find((m) => m.id === lastThreat!.by) : undefined
-      const ranked = [...mechs].sort((a, b) => d2(a.pos, pos) + (a.hp ?? 0) / 20 - (d2(b.pos, pos) + (b.hp ?? 0) / 20))
+      const ranked = [...mechs].sort((a, b) => d2(a.pos, pos) + (a.hp ?? 0) * K.targetHpW - (d2(b.pos, pos) + (b.hp ?? 0) * K.targetHpW))
       // line-of-sight checks cost time: only the nearest few candidates
       for (const m of (attacker ? [attacker, ...ranked] : ranked).slice(0, light ? 2 : 4)) {
         if (d2(m.pos, pos) > (me.weapons[0]?.stats.range ?? 230) + 60) continue
@@ -389,12 +400,29 @@ run((hello: Hello) => {
         const toT = yawTo(pos, target.pos)
         // preferred distance depends on what the second slot can reach
         const kind2 = me.weapons[1]?.kind
-        const want = kind2 === "lightning" ? K.wantLightning : kind2 === "laser" ? K.wantLaser : kind2 === "mortar" ? K.wantMortar : K.want
-        const band = kind2 === "lightning" ? K.bandLightning : K.band
+        const kiting = K.kite > 0 && kind2 === "laser"
+        const sensors = (me.upgrades ?? []).filter((u) => u === "sensors").length * 25
+        const want = kiting ? Math.min(K.kiteDist, cfg.vision.range + sensors - 5) : kind2 === "lightning" ? K.wantLightning : kind2 === "laser" ? K.wantLaser : kind2 === "mortar" ? K.wantMortar : K.want
+        const band = kiting ? K.kiteBand : kind2 === "lightning" ? K.bandLightning : K.band
         const radial = dist > want + band ? 1 : dist < want - band ? -1 : 0
         const side = toT + (strafeSign * Math.PI) / 2
-        const mx = Math.cos(side) + radial * Math.cos(toT) * K.radial
-        const my = Math.sin(side) + radial * Math.sin(toT) * K.radial
+        const rw = kiting ? K.kiteRadial : K.radial
+        let mx = Math.cos(side) + radial * Math.cos(toT) * rw
+        let my = Math.sin(side) + radial * Math.sin(toT) * rw
+        if (kiting && radial < 0) {
+          // backing off: if straight back is blocked, swing the escape direction until it is walkable
+          const base = Math.atan2(my, mx)
+          for (const off of [0, 0.5, -0.5, 1.0, -1.0, 1.5, -1.5]) {
+            const a = base + off
+            const [gi, gj] = world.navOf(pos[0] + Math.cos(a) * 12, pos[1] + Math.sin(a) * 12)
+            if (world.walkable(gi, gj) && insideSafe([pos[0] + Math.cos(a) * 12, pos[1] + Math.sin(a) * 12])) {
+              mx = Math.cos(a)
+              my = Math.sin(a)
+              break
+            }
+          }
+          mode = "kite"
+        }
         const p: P2 = [pos[0] + mx * 12, pos[1] + my * 12]
         goal = insideSafe(p) ? p : anchor
         // Unarmed: a laser or mortar on the ground nearby is worth more than strafing in place
@@ -521,7 +549,7 @@ run((hello: Hello) => {
       } else {
         // Race for a laser on the ground (a roof one needs the energy for the climb).
         const rushLaser = goingFor?.kind === "laser" && goingFor.pos[2] <= world.groundAt(goingFor.pos[0], goingFor.pos[1]) + 3 && d2(pos, goal) > 8
-        act.boost = (me.energy > 30 && (mode === "zone!" || mode === "retreat" || (mode === "to zone" && d2(pos, goal) > 60) || (K.boostFight > 0 && mode === "fight" && me.energy > K.boostFight))) || (rushLaser && me.energy > 15)
+        act.boost = (me.energy > 30 && (mode === "zone!" || mode === "retreat" || (mode === "to zone" && d2(pos, goal) > 60) || (K.boostFight > 0 && mode === "fight" && me.energy > K.boostFight) || (mode === "kite" && me.energy > K.kiteBoost))) || (rushLaser && me.energy > 15)
       }
 
       // ---- climbing to a roof weapon (protocol.md §7: jump, jet until the feet clear the edge) ----

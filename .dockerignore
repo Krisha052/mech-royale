@@ -2,3 +2,4 @@ kit/
 .git/
 *.md
 node_modules/
+tools/

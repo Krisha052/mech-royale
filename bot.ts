@@ -54,6 +54,8 @@ const K = {
   flipOnHit: knob("FLIP_ON_HIT", 1), // reverse strafe when hit
   retreatHp: knob("RETREAT_HP", 0.3), // retreat below this HP fraction if the target is not weaker
   retreatN: knob("RETREAT_N", 3), // retreat when this many enemies are within 120 m
+  dodge: knob("DODGE", 1), // move away from where an incoming mortar shell will land (arena: 0.93 -> 1.23 vs mortar hunters)
+  dodgeMargin: knob("DODGE_MARGIN", 2), // extra metres beyond splash + our radius
   recoverHp: knob("RECOVER_HP", 0), // between fights: below this HP fraction, stay out of sight to regen (0 = off)
   recoverTo: knob("RECOVER_TO", 0.85), // ... until back above this
   recoverRange: knob("RECOVER_RANGE", 100), // ... unless an enemy is closer than this (then fight)
@@ -95,11 +97,16 @@ run((hello: Hello) => {
   // roof pickups we failed to reach: not retried
   const skipPickup = new Set<number>()
   let climbFor: { id: number; since: number } | null = null
+  // Timing safeguard: a late answer drops that decision's shots (protocol §2). The observation
+  // tick jumps by more than decide_every when we missed answers; then do less work for a while.
+  let prevTick = -1
+  let lightUntil = -1
 
-  function planTo(me: Vec3, goal: P2, tick: number) {
+  function planTo(me: Vec3, goal: P2, tick: number, cheap: boolean) {
     const moved = !pathGoal || d2(pathGoal, goal) > 6
-    if (moved || tick - lastPlan > 20 || path.length === 0) {
-      path = world.path(me[0], me[1], goal[0], goal[1], 6000) ?? [goal]
+    // when short on time, keep following the old route unless there is none
+    if (path.length === 0 || (!cheap && (moved || tick - lastPlan > 20)) || (cheap && tick - lastPlan > 40)) {
+      path = world.path(me[0], me[1], goal[0], goal[1], cheap ? 1500 : 6000) ?? [goal]
       pathGoal = goal
       lastPlan = tick
     }
@@ -170,6 +177,11 @@ run((hello: Hello) => {
       const muzzle: Vec3 = [pos[0], pos[1], pos[2] + (me.stats.muzzle_height ?? cfg.mech.muzzle_height)]
       const eye: Vec3 = [pos[0], pos[1], pos[2] + (me.stats.eye_height ?? cfg.mech.eye_height)]
       const act: BotAction = {}
+      const started = performance.now()
+      const elapsed = () => performance.now() - started
+      if (prevTick >= 0 && tick - prevTick > cfg.match.decide_every) lightUntil = t + 10
+      prevTick = tick
+      const light = t < lightUntil
 
       // ---- events ----
       for (const e of obs.events) {
@@ -220,7 +232,8 @@ run((hello: Hello) => {
       let targetClear = false
       const attacker = lastThreat && t - lastThreat.t < 3 ? mechs.find((m) => m.id === lastThreat!.by) : undefined
       const ranked = [...mechs].sort((a, b) => d2(a.pos, pos) + (a.hp ?? 0) / 20 - (d2(b.pos, pos) + (b.hp ?? 0) / 20))
-      for (const m of attacker ? [attacker, ...ranked] : ranked) {
+      // line-of-sight checks cost time: only the nearest few candidates
+      for (const m of (attacker ? [attacker, ...ranked] : ranked).slice(0, light ? 2 : 4)) {
         if (d2(m.pos, pos) > (me.weapons[0]?.stats.range ?? 230) + 60) continue
         const c = shootable(m)
         if (c || !target) {
@@ -259,12 +272,14 @@ run((hello: Hello) => {
       } else if (retreat) {
         // move away from threats, staying inside the safe circle; prefer points threats can't see
         mode = "retreat"
-        const threats = mechs.length ? mechs.map((m) => m.pos) : lastThreat ? [[pos[0] + Math.cos(lastThreat.bearing) * 80, pos[1] + Math.sin(lastThreat.bearing) * 80, pos[2]]] : []
+        const threats = (mechs.length ? [...mechs].sort((a, b) => d2(a.pos, pos) - d2(b.pos, pos)).slice(0, 3).map((m) => m.pos) : lastThreat ? [[pos[0] + Math.cos(lastThreat.bearing) * 80, pos[1] + Math.sin(lastThreat.bearing) * 80, pos[2]]] : [])
         let best: P2 = anchor
         let bestScore = -Infinity
-        for (let k = 0; k < 16; k++) {
+        // 48 candidate spots normally; 8 when short on time
+        const cheapSearch = light || elapsed() > 15
+        for (let k = 0; k < 16; k += cheapSearch ? 2 : 1) {
           const a = (k / 16) * TAU
-          for (const r of [15, 30, 45]) {
+          for (const r of cheapSearch ? [30] : [15, 30, 45]) {
             const p: P2 = [pos[0] + Math.cos(a) * r, pos[1] + Math.sin(a) * r]
             const [gi, gj] = world.navOf(p[0], p[1])
             if (!world.walkable(gi, gj) || !insideSafe(p)) continue
@@ -350,7 +365,7 @@ run((hello: Hello) => {
       }
 
       // ---- movement ----
-      const nav = planTo(pos, goal, tick)
+      const nav = planTo(pos, goal, tick, light || elapsed() > 20)
       act.move = nav.move
       // stuck: commanded to move but barely moved for ~1 s -> jump and jet, then replan
       hist.push([pos[0], pos[1]])
@@ -401,6 +416,44 @@ run((hello: Hello) => {
           }
         }
       } else if (climbFor && !goingFor) climbFor = null
+
+      // ---- dodge mortar shells: predict where each lands and get out of the splash ----
+      if (K.dodge > 0) {
+        const g = cfg.weapons.mortar.gravity
+        const reach = (cfg.weapons.mortar.splash_radius ?? 7) + (me.stats.radius ?? cfg.mech.radius) + K.dodgeMargin
+        let impact: P2 | null = null
+        let soonest = Infinity
+        for (const pr of obs.projectiles) {
+          if (pr.kind !== "mortar") continue
+          // time until it falls to our feet height: z + vz t - g t^2 / 2 = our z
+          const dz = pr.pos[2] - pos[2]
+          const disc = pr.vel[2] * pr.vel[2] + 2 * g * dz
+          if (disc < 0) continue
+          const tl = (pr.vel[2] + Math.sqrt(disc)) / g
+          if (tl <= 0 || tl > 6) continue
+          const land: P2 = [pr.pos[0] + pr.vel[0] * tl, pr.pos[1] + pr.vel[1] * tl]
+          const meAt: P2 = [pos[0] + me.vel[0] * tl, pos[1] + me.vel[1] * tl]
+          if (d2(land, meAt) < reach && tl < soonest) {
+            soonest = tl
+            impact = land
+          }
+        }
+        if (impact) {
+          const away = d2(impact, pos) < 0.5 ? yawTo(pos, goal) + Math.PI / 2 : yawTo(impact, pos)
+          let dir = away
+          for (const off of [0, 0.7, -0.7, 1.4, -1.4]) {
+            const a = away + off
+            const [gi, gj] = world.navOf(pos[0] + Math.cos(a) * 8, pos[1] + Math.sin(a) * 8)
+            if (world.walkable(gi, gj)) {
+              dir = a
+              break
+            }
+          }
+          act.move = [Math.cos(dir), Math.sin(dir)]
+          act.boost = me.energy > 5
+          mode = "dodge"
+        }
+      }
 
       // ---- aim and fire ----
       const gun = me.weapons[0]
@@ -488,7 +541,7 @@ run((hello: Hello) => {
       act.fire = K.pacifist > 0 ? [false, false] : fire
 
       // ---- debug ----
-      draw.label(`${mode} hp${Math.round(hpFrac * 100)} s${Math.round(slack)} ${target ? `T${target.id}${targetClear ? "" : "?"}` : ""}`)
+      draw.label(`${mode}${light ? " L" : ""} hp${Math.round(hpFrac * 100)} s${Math.round(slack)} ${target ? `T${target.id}${targetClear ? "" : "?"}` : ""}`)
       if (path.length) draw.line([pos[0], pos[1], pos[2] + 1], [nav.wp[0], nav.wp[1], pos[2] + 1], "#40c0ff")
       return act
     },

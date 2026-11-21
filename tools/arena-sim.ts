@@ -343,7 +343,9 @@ async function run(runSeed: number): Promise<Result> {
           cubes: 0, upgrades: [], weapons: [{ kind: "gun", cooldown: Math.max(0, A.cooldown), ammo: A.ammo, reload: Math.max(0, A.reload), stats: W.gun }, second],
           in_zone: true, stats: { radius: M.radius, height: M.height, eye_height: M.eye_height, muzzle_height: M.muzzle_height, walk_speed: M.walk_speed, boost_speed: M.boost_speed, turn_rate: M.turn_rate, hp: A.maxHp } },
         mechs: visible.map((h) => ({ id: h.id, kind: "mech", pos: [...h.pos], vel: [...h.vel], aim: [...h.aim], hp: h.hp, max_hp: h.maxHp, cubes: 0, weapons: ["gun", ...(h.second ? [h.second] : [])], charging: false })),
-        projectiles: [], crates: [], cubes: [], pickups: [], sounds: [], beams: [], events: A.events, drops: [], offer: null, zone,
+        projectiles: shells.filter((s) => s.owner !== A && (hyp2(s.p, A.pos) <= cfg.vision.near_range || (hyp2(s.p, A.pos) <= cfg.vision.range && Math.abs(wrap(Math.atan2(s.p[1] - A.pos[1], s.p[0] - A.pos[0]) - A.aim[0])) <= (cfg.vision.fov_deg * Math.PI) / 360)) && world.clear(A.eye(), s.p, 3))
+          .map((s, i) => ({ id: 300 + i, kind: "mortar", pos: [...s.p], vel: [...s.v] })),
+        crates: [], cubes: [], pickups: [], sounds: [], beams: [], events: A.events, drops: [], offer: null, zone,
       })
       A.events = []
       const t0 = performance.now()

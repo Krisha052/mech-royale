@@ -132,7 +132,14 @@ run((hello: Hello) => {
 
       // ---- events ----
       for (const e of obs.events) {
-        if (e.type === "damaged" && e.weapon !== "zone" && e.bearing !== null) lastThreat = { bearing: e.bearing, by: e.by, t }
+        if (e.type === "damaged" && e.weapon !== "zone" && e.bearing !== null) {
+          lastThreat = { bearing: e.bearing, by: e.by, t }
+          // their aim has caught up with our current path: change direction now
+          if (t > nextStrafeFlip - 1.5) {
+            strafeSign = -strafeSign
+            nextStrafeFlip = t + 0.6 + rand() * 1.2
+          }
+        }
       }
 
       // ---- upgrades ----
@@ -180,7 +187,10 @@ run((hello: Hello) => {
       const slack = zoneSlack(obs, anchor)
       const urgent = d2(pos, anchor) > 1 && (outside || slack < 12)
       const threatened = mechs.length > 0 || (lastThreat !== null && t - lastThreat.t < 4)
-      const retreat = threatened && (hpFrac < 0.4 || near.length >= 2)
+      // Retreat only when it pays: low and the fight is not going our way, or badly outnumbered.
+      // Backing away from a single attacker mostly hands it free shots.
+      const targetFrac = target && target.hp !== undefined && target.max_hp ? target.hp / target.max_hp : 1
+      const retreat = threatened && ((hpFrac < 0.3 && targetFrac >= hpFrac) || near.length >= 3)
       const safeR = obs.zone.next_radius * 0.6
       const insideSafe = (p: number[]) => d2(p, obs.zone.next_center) <= Math.max(safeR, 15)
 

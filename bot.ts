@@ -50,6 +50,8 @@ const K = {
   flipOnHit: knob("FLIP_ON_HIT", 1), // reverse strafe when hit
   retreatHp: knob("RETREAT_HP", 0.3), // retreat below this HP fraction if the target is not weaker
   boostFight: knob("BOOST_FIGHT", 40),
+  // DIAGNOSTIC: never fire, always back away from threats. Its score = points earned without kills.
+  pacifist: knob("PACIFIST", 1),
   maxClimb: knob("MAX_CLIMB", 45), // highest roof (m above the ground) we climb for a weapon; 0 = never // boost while strafing when energy is above this (0 = never); duel sim: -30% damage taken
 }
 
@@ -150,7 +152,7 @@ run((hello: Hello) => {
   }
 
   return {
-    name: "survivor",
+    name: K.pacifist > 0 ? "pacifist" : "survivor",
     act(obs: Observation): BotAction {
       const me = obs.self
       const pos = me.pos
@@ -231,7 +233,7 @@ run((hello: Hello) => {
       // Retreat only when it pays: low and the fight is not going our way, or badly outnumbered.
       // Backing away from a single attacker mostly hands it free shots.
       const targetFrac = target && target.hp !== undefined && target.max_hp ? target.hp / target.max_hp : 1
-      const retreat = threatened && ((hpFrac < K.retreatHp && targetFrac >= hpFrac) || near.length >= 3)
+      const retreat = threatened && (K.pacifist > 0 || (hpFrac < K.retreatHp && targetFrac >= hpFrac) || near.length >= 3)
       const safeR = obs.zone.next_radius * 0.6
       const insideSafe = (p: number[]) => d2(p, obs.zone.next_center) <= Math.max(safeR, 15)
 
@@ -464,7 +466,7 @@ run((hello: Hello) => {
       if (gun && !shootAt && (gun.ammo ?? 12) < (gun.stats.mag ?? 12) * 0.5 && (gun.reload ?? 0) <= 0) act.reload = true
 
       act.aim = [wrap(aimYaw), Math.max(cfg.mech.min_pitch, Math.min(cfg.mech.max_pitch, aimPitch))]
-      act.fire = fire
+      act.fire = K.pacifist > 0 ? [false, false] : fire
 
       // ---- debug ----
       draw.label(`${mode} hp${Math.round(hpFrac * 100)} s${Math.round(slack)} ${target ? `T${target.id}${targetClear ? "" : "?"}` : ""}`)

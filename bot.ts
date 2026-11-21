@@ -49,7 +49,8 @@ const K = {
   flipRand: knob("FLIP_RAND", 1.4),
   flipOnHit: knob("FLIP_ON_HIT", 1), // reverse strafe when hit
   retreatHp: knob("RETREAT_HP", 0.3), // retreat below this HP fraction if the target is not weaker
-  boostFight: knob("BOOST_FIGHT", 40), // boost while strafing when energy is above this (0 = never); duel sim: -30% damage taken
+  boostFight: knob("BOOST_FIGHT", 40),
+  maxClimb: knob("MAX_CLIMB", 45), // highest roof (m above the ground) we climb for a weapon; 0 = never // boost while strafing when energy is above this (0 = never); duel sim: -30% damage taken
 }
 
 run((hello: Hello) => {
@@ -80,6 +81,9 @@ run((hello: Hello) => {
   let scanYaw = 0
   // Weapons on the ground never despawn: remember every one we have seen.
   const knownPickups = new Map<number, { kind: string; pos: Vec3 }>()
+  // roof pickups we failed to reach: not retried
+  const skipPickup = new Set<number>()
+  let climbFor: { id: number; since: number } | null = null
 
   function planTo(me: Vec3, goal: P2, tick: number) {
     const moved = !pathGoal || d2(pathGoal, goal) > 6
@@ -219,6 +223,7 @@ run((hello: Hello) => {
       const anchor = zoneAnchor(obs)
       let goal: P2 = anchor
       let mode = "hold"
+      let goingFor: { id: number; kind: string; pos: Vec3 } | undefined // weapon pickup we are walking to
       const outside = !me.in_zone
       const slack = zoneSlack(obs, anchor)
       const urgent = d2(pos, anchor) > 1 && (outside || slack < 12)
@@ -282,20 +287,22 @@ run((hello: Hello) => {
         const cube = obs.cubes.filter((c) => inReach(c.pos, 70)).sort((a, b) => d2(a.pos, pos) - d2(b.pos, pos))[0]
         const want2 = !me.weapons[1]
         // Any remembered weapon better than what we hold. A laser is worth a long walk (duel sim:
-        // gun + laser wins 6/6 against gun only), the others less so. Roof pickups are skipped:
-        // the walk grid is ground-only.
+        // gun + laser wins 6/6 against gun only), the others less so. Roof pickups count if the
+        // roof is low enough to climb (jump, then jet) and we have not failed to reach it before.
         const reachKm = (kind: string) => (kind === "laser" ? 250 : 100)
         let pick: { id: number; kind: string; pos: Vec3 } | undefined
         let pickCost = Infinity
         for (const [id, p] of knownPickups) {
           const better = want2 || WEAPON_RANK[p.kind] > WEAPON_RANK[me.weapons[1]!.kind]
           if (!better || me.weapons.some((w) => w?.kind === p.kind)) continue
-          if (p.pos[2] > world.groundAt(p.pos[0], p.pos[1]) + 3) continue
+          const roofH = p.pos[2] - world.groundAt(p.pos[0], p.pos[1])
+          if (skipPickup.has(id) || (roofH > 3 && roofH > K.maxClimb)) continue
           const dist = d2(p.pos, pos)
           // outside the safe circle is fine while there is time to come back afterwards
           const detour = (dist / (me.stats.walk_speed ?? cfg.mech.walk_speed)) * 2
           if (dist > reachKm(p.kind) || (!insideSafe(p.pos) && slack - detour < 20) || (dist > 80 && slack < 25)) continue
-          const cost = dist - WEAPON_RANK[p.kind] * 40
+          // metres of walking each kind is worth: the sim says a laser is worth far more than the rest
+          const cost = dist - (p.kind === "laser" ? 150 : p.kind === "mortar" ? 40 : 20)
           if (cost < pickCost) {
             pickCost = cost
             pick = { id, ...p }
@@ -306,6 +313,7 @@ run((hello: Hello) => {
           goal = [cube.pos[0], cube.pos[1]]
           mode = "cube"
         } else if (pick) {
+          goingFor = pick
           goal = [pick.pos[0], pick.pos[1]]
           mode = `get ${pick.kind}`
           if (d2(pick.pos, pos) < cfg.loot.pickup_radius - 0.3) {
@@ -337,6 +345,39 @@ run((hello: Hello) => {
       } else {
         act.boost = me.energy > 30 && (mode === "zone!" || mode === "retreat" || (mode === "to zone" && d2(pos, goal) > 60) || (K.boostFight > 0 && mode === "fight" && me.energy > K.boostFight))
       }
+
+      // ---- climbing to a roof weapon (protocol.md §7: jump, jet until the feet clear the edge) ----
+      if (goingFor && goingFor.pos[2] > world.groundAt(goingFor.pos[0], goingFor.pos[1]) + 3) {
+        const p = goingFor
+        const id = p.id
+        const roofZ = p.pos[2]
+        const dh = d2(p.pos, pos)
+        const toP = yawTo(pos, p.pos)
+        const straight: P2 = [Math.cos(toP), Math.sin(toP)]
+        if (pos[2] >= roofZ - 0.6) {
+          // at roof level: walk straight to it (the walk grid does not cover roofs)
+          act.move = dh < 1.5 ? [0, 0] : straight
+          act.boost = false
+          mode = `roof ${p.kind}`
+          climbFor = null
+        } else if (dh < 22 || path.length <= 1) {
+          if (!climbFor || climbFor.id !== id) climbFor = { id, since: t }
+          const need = (roofZ - pos[2]) * 1.6 + 8
+          if (t - climbFor.since > 12) {
+            skipPickup.add(id) // could not get up there: forget it
+            climbFor = null
+          } else if (me.grounded && me.energy < Math.min(need, me.max_energy * 0.95)) {
+            act.move = [0, 0] // wait at the wall for enough energy to make the climb in one go
+            act.boost = false
+            mode = "charge climb"
+          } else {
+            act.move = straight
+            act.jump = me.grounded
+            act.boost = !me.grounded && me.energy > 0
+            mode = "climb"
+          }
+        }
+      } else if (climbFor && !goingFor) climbFor = null
 
       // ---- aim and fire ----
       const gun = me.weapons[0]

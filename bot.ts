@@ -66,6 +66,9 @@ const K = {
   cubeRange: knob("CUBE_RANGE", 150), // walk this far for a visible cube
   shootNpc: knob("SHOOT_NPC", 1), // shoot drones we happen to pass (when not farming)
   shootCrate: knob("SHOOT_CRATE", 1), // shoot crates we happen to pass (when not farming)
+  grabInFight: knob("GRAB_IN_FIGHT", 80), // unarmed in a fight: move to a known laser/mortar within this many m (0 = off). Arena: armed 63% -> 92% of runs, kills 2.21 -> 2.60
+  explore: knob("EXPLORE", 1), // unarmed and no weapon known: walk to unexplored ground to find one
+  exploreUntil: knob("EXPLORE_UNTIL", 240), // stop exploring after this match time, s
   dodge: knob("DODGE", 1), // move away from where an incoming mortar shell will land (arena: 0.93 -> 1.23 vs mortar hunters)
   dodgeMargin: knob("DODGE_MARGIN", 2), // extra metres beyond splash + our radius
   recoverHp: knob("RECOVER_HP", 0), // between fights: below this HP fraction, stay out of sight to regen (0 = off)
@@ -111,6 +114,10 @@ run((hello: Hello) => {
   // drones and crates we have seen (crates never move; drones stay near home)
   const knownNpcs = new Map<number, Vec3>()
   const knownCrates = new Map<number, Vec3>()
+  // Coarse record of ground we have looked over (50 m squares), for exploring when unarmed.
+  const SEEN_CELL = 50
+  const seenCells = new Set<string>()
+  const cellKey = (x: number, y: number) => `${Math.floor(x / SEEN_CELL)},${Math.floor(y / SEEN_CELL)}`
   // roof pickups we failed to reach: not retried
   const skipPickup = new Set<number>()
   let climbFor: { id: number; since: number } | null = null
@@ -244,6 +251,10 @@ run((hello: Hello) => {
       for (const [id, p] of knownNpcs) if (!seenNow.has(id) && d2(p, pos) < 35) knownNpcs.delete(id)
       for (const [id, p] of knownCrates) if (!seenNow.has(id) && d2(p, pos) < 30) knownCrates.delete(id)
 
+      // mark the squares around us as looked over (vision reaches far, but buildings hide a lot)
+      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) seenCells.add(cellKey(pos[0] + dx * SEEN_CELL, pos[1] + dy * SEEN_CELL))
+      const armed = me.weapons[1]?.kind === "laser" || me.weapons[1]?.kind === "mortar"
+
       // ---- what we see ----
       const mechs = obs.mechs.filter((m) => m.kind === "mech")
       const npcs = obs.mechs.filter((m) => m.kind === "npc")
@@ -267,6 +278,31 @@ run((hello: Hello) => {
         if (c) break
       }
 
+      /** Centre of the nearest unexplored 50 m square that is walkable and inside the safe circle. */
+      const exploreTarget = (insideSafe: (p: number[]) => boolean): P2 | null => {
+        const ci = Math.floor(pos[0] / SEEN_CELL)
+        const cj = Math.floor(pos[1] / SEEN_CELL)
+        for (let r = 1; r <= 8; r++) {
+          let best: P2 | null = null
+          let bestD = Infinity
+          for (let i = ci - r; i <= ci + r; i++)
+            for (let j = cj - r; j <= cj + r; j++) {
+              if (Math.max(Math.abs(i - ci), Math.abs(j - cj)) !== r || seenCells.has(`${i},${j}`)) continue
+              const c: P2 = [(i + 0.5) * SEEN_CELL, (j + 0.5) * SEEN_CELL]
+              const w = world.nearestWalkable(...world.navOf(c[0], c[1]), 6)
+              if (!w || !insideSafe(c)) continue
+              const p = world.navCenter(w[0], w[1])
+              const dd = d2(p, pos)
+              if (dd < bestD) {
+                bestD = dd
+                best = p
+              }
+            }
+          if (best) return best
+        }
+        return null
+      }
+
       /** Nearest remembered drone or ground crate worth farming. */
       const farmTarget = (inReach: (p: number[], r: number) => boolean) => {
         let best: { pos: Vec3; npc: boolean } | null = null
@@ -279,7 +315,8 @@ run((hello: Hello) => {
           }
         }
         for (const p of knownCrates.values()) {
-          const dd = d2(p, pos) + 20 // drones give 2 cubes, crates 1
+          // drones give 2 cubes, crates 1; but while unarmed a crate is also a 50% chance of a weapon
+          const dd = d2(p, pos) + (armed ? 20 : -40)
           if (dd < bestD && inReach(p, K.farmRange) && p[2] <= world.groundAt(p[0], p[1]) + 3) {
             bestD = dd
             best = { pos: p, npc: false }
@@ -360,6 +397,23 @@ run((hello: Hello) => {
         const my = Math.sin(side) + radial * Math.sin(toT) * K.radial
         const p: P2 = [pos[0] + mx * 12, pos[1] + my * 12]
         goal = insideSafe(p) ? p : anchor
+        // Unarmed: a laser or mortar on the ground nearby is worth more than strafing in place
+        // (arena: about a quarter of runs end with only the gun, the weakest setup by far).
+        if (K.grabInFight > 0 && !armed) {
+          let near: { id: number; kind: string; pos: Vec3 } | undefined
+          for (const [id, w] of knownPickups) {
+            if ((w.kind !== "laser" && w.kind !== "mortar") || w.pos[2] > world.groundAt(w.pos[0], w.pos[1]) + 3) continue
+            if (d2(w.pos, pos) < K.grabInFight && (!near || d2(w.pos, pos) < d2(near.pos, pos))) near = { id, ...w }
+          }
+          if (near) {
+            goal = [near.pos[0], near.pos[1]]
+            mode = `fight→${near.kind}`
+            if (d2(near.pos, pos) < cfg.loot.pickup_radius - 0.3) {
+              act.take = near.id
+              if (me.weapons[1]) act.drop = 1
+            }
+          }
+        }
         // Several enemies: the arena sim shows we lose when two or more shoot at once. Choose a
         // nearby spot from which we can still shoot our target but the others cannot see us.
         const others = mechs.filter((m) => m.id !== target!.id && d2(m.pos, pos) < 250)
@@ -429,6 +483,9 @@ run((hello: Hello) => {
             act.take = pick.id
             if (!want2) act.drop = 1
           }
+        } else if (K.explore > 0 && !armed && t < K.exploreUntil && !farmTarget(inReach) && exploreTarget(insideSafe)) {
+          goal = exploreTarget(insideSafe)!
+          mode = "explore"
         } else if (K.farm > 0 && t < K.farmUntil && hpFrac > K.farmMinHp && farmTarget(inReach)) {
           const f = farmTarget(inReach)!
           // stand off: drones from beyond their aggro range, crates from close enough to hit

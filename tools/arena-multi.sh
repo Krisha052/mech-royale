@@ -1,17 +1,3 @@
 #!/bin/bash
-# Average kills over 4 seeds x RUNS for each setting. Usage: tools/arena-multi.sh RUNS "name:BOT_X=1,BOT_Y=2|--sim-option" ...
-runs=$1; shift
-tmp=$(mktemp -d)
-for spec in "$@"; do
-  name=${spec%%:*}; rest=${spec#*:}; [ "$rest" = "$spec" ] && rest=""
-  envs=${rest%%|*}; extra=""; [[ "$rest" == *"|"* ]] && extra=${rest#*|}
-  for sd in 3 5 7 9; do
-    ( bun tools/arena-sim.ts --runs "$runs" --seed $sd --env "$envs" $extra | tail -1 | grep -oE 'kills mean [0-9.]+' | awk '{print $3}' > "$tmp/$name-$sd" ) &
-  done
-done
-wait
-for spec in "$@"; do
-  name=${spec%%:*}
-  vals=$(cat "$tmp/$name"-* | tr '\n' ' ')
-  printf "%-14s mean %s   per seed: %s\n" "$name" "$(cat "$tmp/$name"-* | awk '{s+=$1} END {printf "%.2f", s/NR}')" "$vals"
-done
+# Kept for older notes; see tools/arena_multi.py.
+exec python3 "$(dirname "$0")/arena_multi.py" "$@"

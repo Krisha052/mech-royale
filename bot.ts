@@ -27,6 +27,8 @@ const UPGRADE_ORDER = [
 // With a laser, damage first: gauntlet sim (16 runs) kills before death: no upgrade 5.19,
 // laser_damage 8.00, laser_charge 6.00, armor 5.50, plating 5.19.
 const LASER_UPGRADE_ORDER = ["laser_damage", "laser_charge", ...UPGRADE_ORDER.filter((u) => u !== "laser_damage" && u !== "laser_charge")]
+const REAL_WINNER_ORDER = ["armor", "nanites", "plating", "gun_damage", "gun_rate", "gun_mag", "laser_damage", "laser_charge", "servos",
+  ...UPGRADE_ORDER.filter((u) => !["armor", "nanites", "plating", "gun_damage", "gun_rate", "gun_mag", "laser_damage", "laser_charge", "servos"].includes(u))]
 // Weapon preference for the second slot.
 // Real-map arena sim (30 runs, kills before death): laser 4.13, mortar 3.30, lightning 1.75, none 1.6.
 const WEAPON_RANK: Record<string, number> = { laser: 3, mortar: 2, lightning: 1, gun: 0 }
@@ -108,6 +110,7 @@ const K = {
   // 4% damage). Public matches: the winner picks up kill cubes within seconds, mid-fight.
   cubeFight: knob("CUBE_FIGHT", 200), // real: 3.67 -> 4.10 with 120 m
   cubeMemory: knob("CUBE_MEMORY", 1), // remember cubes we have seen and where our kills died (their cubes drop there) // walk over visible cubes within this many m while fighting (0 = off)
+  timing: knob("TIMING", 1), // timing safeguard (do less work when slow); simulations turn it off so CPU load does not change behaviour
   dodge: knob("DODGE", 1), // move away from where an incoming mortar shell will land (arena: 0.93 -> 1.23 vs mortar hunters)
   dodgeMargin: knob("DODGE_MARGIN", 2), // extra metres beyond splash + our radius
   recoverHp: knob("RECOVER_HP", 0), // between fights: below this HP fraction, stay out of sight to regen (0 = off)
@@ -268,10 +271,10 @@ run((hello: Hello) => {
       const eye: Vec3 = [pos[0], pos[1], pos[2] + (me.stats.eye_height ?? cfg.mech.eye_height)]
       const act: BotAction = {}
       const started = performance.now()
-      const elapsed = () => performance.now() - started
+      const elapsed = () => (K.timing > 0 ? performance.now() - started : 0)
       if (prevTick >= 0 && tick - prevTick > cfg.match.decide_every) lightUntil = t + 10
       prevTick = tick
-      const light = t < lightUntil
+      const light = K.timing > 0 && t < lightUntil
 
       // ---- events ----
       for (const e of obs.events) {
@@ -308,7 +311,8 @@ run((hello: Hello) => {
         let bestRank = Infinity
         const first = ["", "plating", "armor", "nanites"][K.upgMode] ?? ""
         const base = me.weapons.some((w) => w?.kind === "laser") && K.upgMode === 0 ? LASER_UPGRADE_ORDER : UPGRADE_ORDER
-        const order = first ? [first, ...base.filter((u) => u !== first)] : base
+        // mode 4: what top-4 finishers chose most in recorded public matches (22 matches)
+        const order = K.upgMode === 4 ? REAL_WINNER_ORDER : first ? [first, ...base.filter((u) => u !== first)] : base
         obs.offer.choices.forEach((c, i) => {
           const r = order.indexOf(c.id)
           const rank = r < 0 ? 99 : r

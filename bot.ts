@@ -1,3 +1,4 @@
+// rerun 3 of G (1fac0f5); behaviour unchanged
 /**
  * Survivor bot for mechfight/1.
  *

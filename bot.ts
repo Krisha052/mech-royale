@@ -60,18 +60,26 @@ const K = {
   fightPosEvery: knob("FIGHT_POS_EVERY", 5), // decisions between spot choices
   // Farming power cubes (+4% max HP and damage each, up to 10; upgrade offers at 1, 3, 6, 10).
   // Arena sim with a cube head start: 0 cubes 2.85 kills, 6 cubes 3.55, 10 cubes 4.95.
-  farm: knob("FARM", 1), // in free time, go and shoot drones and ground crates for cubes (arena: 2.17 -> 2.73 kills, cubes at death 3.0 -> 6.1)
+  farm: knob("FARM", 0), // in free time, go and shoot drones and ground crates for cubes (arena: 2.17 -> 2.73 kills, cubes at death 3.0 -> 6.1)
   farmUntil: knob("FARM_UNTIL", 420), // match time after which we stop farming, s
   farmRange: knob("FARM_RANGE", 250), // how far we walk for a drone or crate, m
   farmMinHp: knob("FARM_MIN_HP", 0.6), // arena (4 seeds x 30): 0.85 -> 2.72 kills vs 0.70 -> 2.52 // do not farm below this HP fraction
   npcStandoff: knob("NPC_STANDOFF", 70), // shoot drones from here (their aggro range is 45 m)
   cubeRange: knob("CUBE_RANGE", 200), // walk this far for a visible cube
-  shootNpc: knob("SHOOT_NPC", 1), // shoot drones we happen to pass (when not farming)
-  shootCrate: knob("SHOOT_CRATE", 1), // shoot crates we happen to pass (when not farming)
+  shootNpc: knob("SHOOT_NPC", 0), // shoot drones we happen to pass (when not farming)
+  shootCrate: knob("SHOOT_CRATE", 0), // shoot crates we happen to pass (when not farming)
   grabInFight: knob("GRAB_IN_FIGHT", 80), // unarmed in a fight: move to a known laser/mortar within this many m (0 = off). Arena: armed 63% -> 92% of runs, kills 2.21 -> 2.60
   explore: knob("EXPLORE", 1), // unarmed and no weapon known: walk to unexplored ground to find one
   exploreUntil: knob("EXPLORE_UNTIL", 240), // stop exploring after this match time, s
   faceS: knob("FACE_S", 0), // after an enemy leaves our 5 s memory, keep the torso toward where it was for this long
+  // GHOST: stay unheard and unseen until found (protocol §8: walking under 5 m/s is silent, gunfire carries 320 m,
+  // boosting 90 m). Quiet = slow walk, no boost or jets, no shots, ignore far enemies that have not found us.
+  // Found (a mech within GHOST_R, or hit by a mech) = normal fighting for GHOST_HOLD s after the last contact.
+  ghost: knob("GHOST", 1),
+  ghostR: knob("GHOST_R", 110),
+  ghostHold: knob("GHOST_HOLD", 12),
+  ghostRushT: knob("GHOST_RUSH_T", 20), // before this match time, run (loudly) for a laser: being armed when found matters most
+  ghostSpeed: knob("GHOST_SPEED", 0.38), // fraction of walk speed (11.7 m/s): 0.38 = 4.4 m/s, under the 5 m/s step threshold
   arcW: knob("ARC_W", 0), // target ranking: + this many metres per other enemy that would be behind us while we aim at it
   targetHpW: knob("TARGET_HP_W", 0.05), // target ranking = distance + hp * this (higher: finish wounded ones first)
   upgMode: knob("UPG_MODE", 7), // 0: laser damage first when holding a laser; 1 plating first; 2 armor first; 3 nanites first
@@ -189,6 +197,7 @@ run((hello: Hello) => {
   let strafeSign = 1
   let nextStrafeFlip = 0
   let lastThreat: Threat | null = null
+  let foundUntil = -1 // ghost mode: fight normally until this time
   let scanYaw = 0
   let recovering = false
   let unseenHit: { bearing: number; until: number } | null = null
@@ -460,6 +469,18 @@ run((hello: Hello) => {
           targetClear = c
         }
         if (c) break
+      }
+
+      // ---- ghost: have we been found? ----
+      if (lastThreat && lastThreat.by !== null && lastThreat.by < 100 && t - lastThreat.t < 0.5) foundUntil = t + K.ghostHold
+      if (mechs.some((m) => d2(m.pos, pos) < K.ghostR)) foundUntil = t + K.ghostHold
+      const quiet = K.ghost > 0 && t >= foundUntil
+      let ghostFace: number | null = null
+      if (quiet && target) {
+        // a far enemy that has not found us: keep still, keep our front (and our view) on it, hold fire
+        ghostFace = yawTo(pos, target.pos)
+        target = null
+        targetClear = false
       }
 
       /** Centre of the nearest unexplored 50 m square that is walkable and inside the safe circle. */
@@ -1060,6 +1081,20 @@ run((hello: Hello) => {
         }
       }
 
+      // ---- ghost: walk silently (unless the zone forces a run), never boost or jump ----
+      if (quiet && !urgent && !(t < K.ghostRushT && goingFor?.kind === "laser") && !mode.startsWith("dodge") && !mode.startsWith("roof") && mode !== "climb" && mode !== "charge climb") {
+        if (ghostFace !== null) act.move = [0, 0]
+        else {
+          // stay under the 5 m/s step threshold even after speed upgrades
+          const gs = Math.min(K.ghostSpeed, 4.6 / (me.stats.walk_speed ?? cfg.mech.walk_speed))
+          const L = Math.hypot(act.move[0], act.move[1])
+          if (L > gs) act.move = [(act.move[0] * gs) / L, (act.move[1] * gs) / L]
+        }
+        act.boost = false
+        if (t >= unstickUntil) act.jump = false
+        mode = `ghost ${mode}`
+      }
+
       // ---- aim and fire ----
       const gun = me.weapons[0]
       const second = me.weapons[1]
@@ -1192,6 +1227,10 @@ run((hello: Hello) => {
           aimPitch = 0
           fire[0] = false
         }
+      }
+      if (ghostFace !== null && !shootAt) {
+        aimYaw = ghostFace
+        aimPitch = 0
       }
       act.aim = [wrap(aimYaw), Math.max(cfg.mech.min_pitch, Math.min(cfg.mech.max_pitch, aimPitch))]
       act.fire = K.pacifist > 0 ? [false, false] : fire

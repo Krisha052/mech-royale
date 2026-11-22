@@ -61,9 +61,9 @@ const K = {
   // Farming power cubes (+4% max HP and damage each, up to 10; upgrade offers at 1, 3, 6, 10).
   // Arena sim with a cube head start: 0 cubes 2.85 kills, 6 cubes 3.55, 10 cubes 4.95.
   farm: knob("FARM", 1), // in free time, go and shoot drones and ground crates for cubes (arena: 2.17 -> 2.73 kills, cubes at death 3.0 -> 6.1)
-  farmUntil: knob("FARM_UNTIL", 420), // match time after which we stop farming, s
-  farmRange: knob("FARM_RANGE", 250), // how far we walk for a drone or crate, m
-  farmMinHp: knob("FARM_MIN_HP", 0.6), // arena (4 seeds x 30): 0.85 -> 2.72 kills vs 0.70 -> 2.52 // do not farm below this HP fraction
+  farmUntil: knob("FARM_UNTIL", 480), // match time after which we stop farming, s
+  farmRange: knob("FARM_RANGE", 350), // how far we walk for a drone or crate, m
+  farmMinHp: knob("FARM_MIN_HP", 0.5), // arena (4 seeds x 30): 0.85 -> 2.72 kills vs 0.70 -> 2.52 // do not farm below this HP fraction
   npcStandoff: knob("NPC_STANDOFF", 70), // shoot drones from here (their aggro range is 45 m)
   cubeRange: knob("CUBE_RANGE", 200), // walk this far for a visible cube
   shootNpc: knob("SHOOT_NPC", 1), // shoot drones we happen to pass (when not farming)

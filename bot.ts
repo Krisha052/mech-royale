@@ -44,12 +44,12 @@ const K = {
   // Preferred fight distances. Real-map arena sim (30 runs, kills before death): gun 140 m 2.00 vs
   // 90 m 1.63; laser 180 m 4.13 vs 140 m 3.60 vs 90 m 3.25; mortar 120-160 m ~3.3. House bots
   // fight at ~55 m and miss more with range, while our led shots stay accurate.
-  want: knob("WANT", 95), // preferred fight distance with the gun alone, m
+  want: knob("WANT", 75), // preferred fight distance with the gun alone, m
   band: knob("BAND", 30), // no radial movement within want +- band
-  wantLaser: knob("WANT_LASER", 140), // ... when holding a laser (hitscan, 280 m)
+  wantLaser: knob("WANT_LASER", 110), // ... when holding a laser (hitscan, 280 m)
   wantLightning: knob("WANT_LIGHTNING", 140), // ... with lightning (45 m reach): fight like the gun; closing in loses in both sims
   bandLightning: knob("BAND_LIGHTNING", 8),
-  wantMortar: knob("WANT_MORTAR", 115), // ... with a mortar (lobbed; splash hurts us up close)
+  wantMortar: knob("WANT_MORTAR", 100), // ... with a mortar (lobbed; splash hurts us up close)
   radial: knob("RADIAL", 0.8), // weight of closing/opening distance vs sideways
   flipMin: knob("FLIP_MIN", 0.8), // strafe direction lasts flipMin + rand * flipRand s
   flipRand: knob("FLIP_RAND", 1.4),

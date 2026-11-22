@@ -1,3 +1,4 @@
+// rerun of X4 (4861f79) to measure score noise; behaviour unchanged
 /**
  * Survivor bot for mechfight/1.
  *

@@ -60,14 +60,14 @@ const K = {
   fightPosEvery: knob("FIGHT_POS_EVERY", 5), // decisions between spot choices
   // Farming power cubes (+4% max HP and damage each, up to 10; upgrade offers at 1, 3, 6, 10).
   // Arena sim with a cube head start: 0 cubes 2.85 kills, 6 cubes 3.55, 10 cubes 4.95.
-  farm: knob("FARM", 1), // in free time, go and shoot drones and ground crates for cubes (arena: 2.17 -> 2.73 kills, cubes at death 3.0 -> 6.1)
+  farm: knob("FARM", 0), // in free time, go and shoot drones and ground crates for cubes (arena: 2.17 -> 2.73 kills, cubes at death 3.0 -> 6.1)
   farmUntil: knob("FARM_UNTIL", 420), // match time after which we stop farming, s
   farmRange: knob("FARM_RANGE", 250), // how far we walk for a drone or crate, m
   farmMinHp: knob("FARM_MIN_HP", 0.6), // arena (4 seeds x 30): 0.85 -> 2.72 kills vs 0.70 -> 2.52 // do not farm below this HP fraction
   npcStandoff: knob("NPC_STANDOFF", 70), // shoot drones from here (their aggro range is 45 m)
   cubeRange: knob("CUBE_RANGE", 200), // walk this far for a visible cube
-  shootNpc: knob("SHOOT_NPC", 1), // shoot drones we happen to pass (when not farming)
-  shootCrate: knob("SHOOT_CRATE", 1), // shoot crates we happen to pass (when not farming)
+  shootNpc: knob("SHOOT_NPC", 0), // shoot drones we happen to pass (when not farming)
+  shootCrate: knob("SHOOT_CRATE", 0), // shoot crates we happen to pass (when not farming)
   grabInFight: knob("GRAB_IN_FIGHT", 80), // unarmed in a fight: move to a known laser/mortar within this many m (0 = off). Arena: armed 63% -> 92% of runs, kills 2.21 -> 2.60
   explore: knob("EXPLORE", 1), // unarmed and no weapon known: walk to unexplored ground to find one
   exploreUntil: knob("EXPLORE_UNTIL", 240), // stop exploring after this match time, s
@@ -100,7 +100,7 @@ const K = {
   // Split the pack: with 2+ enemies around, also move away from their centre while fighting.
   pack: knob("PACK", 0), // weight of the away-from-centre pull (0 = off)
   packRange: knob("PACK_RANGE", 250), // enemies within this count toward the centre
-  npcFix: knob("NPC_FIX", 0), // shoot drones that are hurting us at any HP; no drone farming with hunters about
+  npcFix: knob("NPC_FIX", 1), // shoot drones that are hurting us at any HP; no drone farming with hunters about
   roofSafe: knob("ROOF_SAFE", 0), // no roof climbing while under fire or below 60% HP
   // Supply drops: full heal + 3 cubes after standing in the ring alone for capture_s. Go for one
   // even during a fight (we keep shooting on the way), if it lands soon and is not too far.

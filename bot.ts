@@ -71,6 +71,8 @@ const K = {
   grabInFight: knob("GRAB_IN_FIGHT", 80), // unarmed in a fight: move to a known laser/mortar within this many m (0 = off). Arena: armed 63% -> 92% of runs, kills 2.21 -> 2.60
   explore: knob("EXPLORE", 1), // unarmed and no weapon known: walk to unexplored ground to find one
   exploreUntil: knob("EXPLORE_UNTIL", 240), // stop exploring after this match time, s
+  faceS: knob("FACE_S", 0), // after an enemy leaves our 5 s memory, keep the torso toward where it was for this long
+  arcW: knob("ARC_W", 0), // target ranking: + this many metres per other enemy that would be behind us while we aim at it
   targetHpW: knob("TARGET_HP_W", 0.05), // target ranking = distance + hp * this (higher: finish wounded ones first)
   upgMode: knob("UPG_MODE", 7), // 0: laser damage first when holding a laser; 1 plating first; 2 armor first; 3 nanites first
   // Kite with a laser: hold a long distance (their accuracy falls with range, our led shots do
@@ -199,6 +201,7 @@ run((hello: Hello) => {
   // where cubes are: ones we have seen (they never move) and the spots where our kills died
   const knownCubes = new Map<number, Vec3>()
   const lastSeenAt = new Map<number, Vec3>()
+  const lastSeenT = new Map<number, number>()
   let lootSpots: { pos: Vec3; until: number }[] = []
   let lastNpcHit: { id: number; t: number } | null = null
   let lastHunterSeen = -999
@@ -329,6 +332,7 @@ run((hello: Hello) => {
 
       // ---- events ----
       for (const e of obs.events) {
+        if (e.type === "kill") lastSeenT.delete(e.target)
         if (e.type === "kill" && K.cubeMemory > 0) {
           const at = lastSeenAt.get(e.target)
           if (at) lootSpots.push({ pos: at, until: t + 25 })
@@ -364,7 +368,10 @@ run((hello: Hello) => {
       }
 
       // ---- cube memory ----
-      for (const m of obs.mechs) if (m.kind === "mech") lastSeenAt.set(m.id, m.pos)
+      for (const m of obs.mechs) if (m.kind === "mech") {
+        lastSeenAt.set(m.id, m.pos)
+        lastSeenT.set(m.id, t)
+      }
       if (K.cubeMemory > 0) {
         for (const c of obs.cubes) knownCubes.set(c.id, c.pos)
         const visibleIds = new Set(obs.cubes.map((c) => c.id))
@@ -434,7 +441,15 @@ run((hello: Hello) => {
       const attacker = lastThreat && t - lastThreat.t < 3 ? mechs.find((m) => m.id === lastThreat!.by) : undefined
       const danger = (m: ActorObs) => !K.threat ? 0
         : (m.charging ? K.threatCharging : 0) + (m.weapons?.includes("laser") ? K.threatLaser : 0) + (m.weapons?.includes("mortar") ? K.threatMortar : 0)
-      const rank = (m: ActorObs) => d2(m.pos, pos) + (m.hp ?? 0) * K.targetHpW - danger(m)
+      // enemies outside the front half (centred on our aim) hit our rear for 1.5x: prefer a target that keeps the others in front
+      const behind = (m: ActorObs) => {
+        if (!K.arcW) return 0
+        const y = yawTo(pos, m.pos)
+        let n = 0
+        for (const o of mechs) if (o !== m && d2(o.pos, pos) < 200 && Math.abs(wrap(yawTo(pos, o.pos) - y)) > Math.PI / 2 - 0.15) n++
+        return n
+      }
+      const rank = (m: ActorObs) => d2(m.pos, pos) + (m.hp ?? 0) * K.targetHpW - danger(m) + K.arcW * behind(m)
       const ranked = [...mechs].sort((a, b) => rank(a) - rank(b))
       // line-of-sight checks cost time: only the nearest few candidates
       for (const m of (attacker ? [attacker, ...ranked] : ranked).slice(0, light ? 2 : 4)) {
@@ -1126,6 +1141,19 @@ run((hello: Hello) => {
       } else if (lastThreat && t - lastThreat.t < 4) {
         // turn toward an unseen attacker: protects the rear and brings it into view
         aimYaw = lastThreat.bearing
+      } else if (K.faceS > 0 && (() => {
+        // an enemy we lost track of recently: keep our front toward where it was (it is probably still coming)
+        let bestP: Vec3 | null = null
+        let bestD = 250
+        for (const [id, st] of lastSeenT) {
+          if (t - st > K.faceS) continue
+          const p = lastSeenAt.get(id)
+          if (p && d2(p, pos) < bestD) { bestD = d2(p, pos); bestP = p }
+        }
+        if (bestP) aimYaw = yawTo(pos, bestP)
+        return bestP !== null
+      })()) {
+        // aim set above
       } else {
         // heard something we cannot see: look there first
         if (K.hear > 0 && heardBearing && t - heardBearing.t < 1.5) {

@@ -127,7 +127,8 @@ def main():
             order = sorted(range(len(us)), key=lambda i: -scores[i])
             elite = [us[i] for i in order[: a.mu]]
             new_mean = [sum(e[k] for e in elite) / a.mu for k in range(len(NAMES))]
-            new_sigma = [max(0.03, 0.7 * s + 0.3 * math.sqrt(sum((e[k] - new_mean[k]) ** 2 for e in elite) / a.mu)) for k, s in enumerate(sigma)]
+            # shrink slowly and never below 0.08, so the search keeps exploring instead of fixing early on noise
+            new_sigma = [max(0.08, 0.9 * s + 0.1 * math.sqrt(sum((e[k] - new_mean[k]) ** 2 for e in elite) / a.mu)) for k, s in enumerate(sigma)]
             mean, sigma = [min(1, max(0, x)) for x in new_mean], new_sigma
             top = order[0]
             log(a.log, {"type": "generation", "gen": gen, "scores": [round(x, 2) for x in scores], "best": scores[top],

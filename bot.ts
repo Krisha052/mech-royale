@@ -42,34 +42,34 @@ const K = {
   // Preferred fight distances. Real-map arena sim (30 runs, kills before death): gun 140 m 2.00 vs
   // 90 m 1.63; laser 180 m 4.13 vs 140 m 3.60 vs 90 m 3.25; mortar 120-160 m ~3.3. House bots
   // fight at ~55 m and miss more with range, while our led shots stay accurate.
-  want: knob("WANT", 125), // preferred fight distance with the gun alone, m
-  band: knob("BAND", 33), // no radial movement within want +- band
-  wantLaser: knob("WANT_LASER", 205), // ... when holding a laser (hitscan, 280 m)
+  want: knob("WANT", 140), // preferred fight distance with the gun alone, m
+  band: knob("BAND", 30), // no radial movement within want +- band
+  wantLaser: knob("WANT_LASER", 180), // ... when holding a laser (hitscan, 280 m)
   wantLightning: knob("WANT_LIGHTNING", 140), // ... with lightning (45 m reach): fight like the gun; closing in loses in both sims
   bandLightning: knob("BAND_LIGHTNING", 8),
-  wantMortar: knob("WANT_MORTAR", 117), // ... with a mortar (lobbed; splash hurts us up close)
-  radial: knob("RADIAL", 0.855), // weight of closing/opening distance vs sideways
-  flipMin: knob("FLIP_MIN", 0.367), // strafe direction lasts flipMin + rand * flipRand s
-  flipRand: knob("FLIP_RAND", 1.717),
+  wantMortar: knob("WANT_MORTAR", 140), // ... with a mortar (lobbed; splash hurts us up close)
+  radial: knob("RADIAL", 0.8), // weight of closing/opening distance vs sideways
+  flipMin: knob("FLIP_MIN", 0.8), // strafe direction lasts flipMin + rand * flipRand s
+  flipRand: knob("FLIP_RAND", 1.4),
   flipOnHit: knob("FLIP_ON_HIT", 1), // reverse strafe when hit
-  retreatHp: knob("RETREAT_HP", 0.384), // retreat below this HP fraction if the target is not weaker
+  retreatHp: knob("RETREAT_HP", 0.3), // retreat below this HP fraction if the target is not weaker
   retreatN: knob("RETREAT_N", 3), // retreat when this many enemies are within 120 m
   fightPos: knob("FIGHT_POS", 0), // with 2+ enemies around, pick spots that keep our target in sight and hide us from the others
   fightPosEvery: knob("FIGHT_POS_EVERY", 5), // decisions between spot choices
   // Farming power cubes (+4% max HP and damage each, up to 10; upgrade offers at 1, 3, 6, 10).
   // Arena sim with a cube head start: 0 cubes 2.85 kills, 6 cubes 3.55, 10 cubes 4.95.
   farm: knob("FARM", 1), // in free time, go and shoot drones and ground crates for cubes (arena: 2.17 -> 2.73 kills, cubes at death 3.0 -> 6.1)
-  farmUntil: knob("FARM_UNTIL", 464), // match time after which we stop farming, s
-  farmRange: knob("FARM_RANGE", 297), // how far we walk for a drone or crate, m
-  farmMinHp: knob("FARM_MIN_HP", 0.515), // arena (4 seeds x 30): 0.85 -> 2.72 kills vs 0.70 -> 2.52 // do not farm below this HP fraction
+  farmUntil: knob("FARM_UNTIL", 420), // match time after which we stop farming, s
+  farmRange: knob("FARM_RANGE", 250), // how far we walk for a drone or crate, m
+  farmMinHp: knob("FARM_MIN_HP", 0.6), // arena (4 seeds x 30): 0.85 -> 2.72 kills vs 0.70 -> 2.52 // do not farm below this HP fraction
   npcStandoff: knob("NPC_STANDOFF", 70), // shoot drones from here (their aggro range is 45 m)
-  cubeRange: knob("CUBE_RANGE", 191), // walk this far for a visible cube
+  cubeRange: knob("CUBE_RANGE", 200), // walk this far for a visible cube
   shootNpc: knob("SHOOT_NPC", 1), // shoot drones we happen to pass (when not farming)
   shootCrate: knob("SHOOT_CRATE", 1), // shoot crates we happen to pass (when not farming)
   grabInFight: knob("GRAB_IN_FIGHT", 80), // unarmed in a fight: move to a known laser/mortar within this many m (0 = off). Arena: armed 63% -> 92% of runs, kills 2.21 -> 2.60
   explore: knob("EXPLORE", 1), // unarmed and no weapon known: walk to unexplored ground to find one
   exploreUntil: knob("EXPLORE_UNTIL", 240), // stop exploring after this match time, s
-  targetHpW: knob("TARGET_HP_W", 0.022), // target ranking = distance + hp * this (higher: finish wounded ones first)
+  targetHpW: knob("TARGET_HP_W", 0.05), // target ranking = distance + hp * this (higher: finish wounded ones first)
   upgMode: knob("UPG_MODE", 0), // 0: laser damage first when holding a laser; 1 plating first; 2 armor first; 3 nanites first
   // Kite with a laser: hold a long distance (their accuracy falls with range, our led shots do
   // not) and back off firmly, boosting, when they close in. Vision ends at 200 m (+25 with sensors).
@@ -85,25 +85,34 @@ const K = {
   // Bullet dodging (Robocode-style): visible enemy bullets come with position and velocity;
   // sidestep the ones that would hit us within the next second.
   bulletDodge: knob("BULLET_DODGE", 1), // arena (4 seeds x 30): 2.94 -> 3.65 kills with margin 1, better on every seed
-  bulletMargin: knob("BULLET_MARGIN", 0.845), // extra metres beyond our radius that count as a hit
-  bulletHorizon: knob("BULLET_HORIZON", 0.63), // react to bullets arriving within this many seconds
+  bulletMargin: knob("BULLET_MARGIN", 1), // extra metres beyond our radius that count as a hit
+  bulletHorizon: knob("BULLET_HORIZON", 1), // react to bullets arriving within this many seconds
   gravityLead: knob("GRAVITY_LEAD", 1), // lead airborne targets along a falling arc (not a straight line)
   // Threat-first targeting: count dangerous enemies as if they were this many metres closer.
-  threat: knob("THREAT", 1),
+  threat: knob("THREAT", 0),
   threatLaser: knob("THREAT_LASER", 80),
   threatCharging: knob("THREAT_CHARGING", 150),
   threatMortar: knob("THREAT_MORTAR", 30),
   // Split the pack: with 2+ enemies around, also move away from their centre while fighting.
-  pack: knob("PACK", 0.158), // weight of the away-from-centre pull (0 = off)
+  pack: knob("PACK", 0), // weight of the away-from-centre pull (0 = off)
   packRange: knob("PACK_RANGE", 250), // enemies within this count toward the centre
   npcFix: knob("NPC_FIX", 0), // shoot drones that are hurting us at any HP; no drone farming with hunters about
   roofSafe: knob("ROOF_SAFE", 0), // no roof climbing while under fire or below 60% HP
+  // Supply drops: full heal + 3 cubes after standing in the ring alone for capture_s. Go for one
+  // even during a fight (we keep shooting on the way), if it lands soon and is not too far.
+  dropRush: knob("DROP_RUSH", 0),
+  dropRange: knob("DROP_RANGE", 250), // m
+  dropLead: knob("DROP_LEAD", 10), // start moving this many seconds before it lands
+  dropMaxHp: knob("DROP_MAX_HP", 1.01), // only if our HP fraction is below this
+  // Collect cubes during fights (killed mechs drop all their cubes + 2; each cube heals ~56 HP and adds
+  // 4% damage). Public matches: the winner picks up kill cubes within seconds, mid-fight.
+  cubeFight: knob("CUBE_FIGHT", 120), // walk over visible cubes within this many m while fighting (0 = off)
   dodge: knob("DODGE", 1), // move away from where an incoming mortar shell will land (arena: 0.93 -> 1.23 vs mortar hunters)
-  dodgeMargin: knob("DODGE_MARGIN", 2.111), // extra metres beyond splash + our radius
-  recoverHp: knob("RECOVER_HP", 0.012), // between fights: below this HP fraction, stay out of sight to regen (0 = off)
+  dodgeMargin: knob("DODGE_MARGIN", 2), // extra metres beyond splash + our radius
+  recoverHp: knob("RECOVER_HP", 0), // between fights: below this HP fraction, stay out of sight to regen (0 = off)
   recoverTo: knob("RECOVER_TO", 0.85), // ... until back above this
   recoverRange: knob("RECOVER_RANGE", 100), // ... unless an enemy is closer than this (then fight)
-  boostFight: knob("BOOST_FIGHT", 44),
+  boostFight: knob("BOOST_FIGHT", 40),
   // DIAGNOSTIC: never fire, always back away from threats. Its score = points earned without kills.
   pacifist: knob("PACIFIST", 0),
   maxClimb: knob("MAX_CLIMB", 45), // highest roof (m above the ground) we climb for a weapon; 0 = never // boost while strafing when energy is above this (0 = never); duel sim: -30% damage taken
@@ -409,8 +418,18 @@ run((hello: Hello) => {
       const safeR = obs.zone.next_radius * 0.6
       const insideSafe = (p: number[]) => d2(p, obs.zone.next_center) <= Math.max(safeR, 15)
 
+      // a supply drop worth rushing: landing soon, close enough, nobody else capturing it
+      const rushDrop = K.dropRush > 0 && hpFrac < K.dropMaxHp
+        ? (obs.drops ?? []).filter((d) => d.lands_in <= K.dropLead && d2(d.pos, pos) < K.dropRange && (d.holder === null || d.holder === me.id))
+            .sort((a, b) => d2(a.pos, pos) - d2(b.pos, pos))[0]
+        : undefined
       if (urgent) {
         mode = outside ? "zone!" : "to zone"
+      } else if (rushDrop) {
+        // stand near the middle of the ring (radius 8 m); move there while still fighting
+        const dd = d2(rushDrop.pos, pos)
+        goal = dd > 2 ? [rushDrop.pos[0], rushDrop.pos[1]] : [pos[0], pos[1]]
+        mode = rushDrop.lands_in > 0 ? "drop wait" : dd < (rushDrop.radius ?? 8) ? "drop capture" : "drop rush"
       } else if (retreat) {
         // move away from threats, staying inside the safe circle; prefer points threats can't see
         mode = "retreat"
@@ -528,6 +547,14 @@ run((hello: Hello) => {
         } else coverSpot = null
         // Unarmed: a laser or mortar on the ground nearby is worth more than strafing in place
         // (arena: about a quarter of runs end with only the gun, the weakest setup by far).
+        // cubes lying near us (usually from the kill we just made): grab them while still fighting
+        if (K.cubeFight > 0) {
+          const c = obs.cubes.filter((q) => d2(q.pos, pos) < K.cubeFight && Math.abs(q.pos[2] - pos[2]) < 4).sort((a, b) => d2(a.pos, pos) - d2(b.pos, pos))[0]
+          if (c) {
+            goal = [c.pos[0], c.pos[1]]
+            mode = "fight→cube"
+          }
+        }
         if (K.grabInFight > 0 && !armed) {
           let near: { id: number; kind: string; pos: Vec3 } | undefined
           for (const [id, w] of knownPickups) {
@@ -651,7 +678,7 @@ run((hello: Hello) => {
       } else {
         // Race for a laser on the ground (a roof one needs the energy for the climb).
         const rushLaser = goingFor?.kind === "laser" && goingFor.pos[2] <= world.groundAt(goingFor.pos[0], goingFor.pos[1]) + 3 && d2(pos, goal) > 8
-        act.boost = (me.energy > 30 && (mode === "zone!" || mode === "retreat" || (mode === "to zone" && d2(pos, goal) > 60) || (K.boostFight > 0 && mode === "fight" && me.energy > K.boostFight) || (mode === "kite" && me.energy > K.kiteBoost) || (mode === "split pack" && me.energy > K.boostFight))) || (rushLaser && me.energy > 15)
+        act.boost = (me.energy > 30 && (mode === "zone!" || mode === "retreat" || (mode === "to zone" && d2(pos, goal) > 60) || (K.boostFight > 0 && mode === "fight" && me.energy > K.boostFight) || (mode === "kite" && me.energy > K.kiteBoost) || (mode === "split pack" && me.energy > K.boostFight) || (mode === "drop rush" && me.energy > 30))) || (rushLaser && me.energy > 15)
       }
 
       // ---- climbing to a roof weapon (protocol.md §7: jump, jet until the feet clear the edge) ----

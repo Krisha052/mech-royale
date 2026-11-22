@@ -31,7 +31,12 @@ const MAXACTIVE = Number(opt("max-active", "4"))
 const BOT = opt("bot", "bot.ts")
 const ENV = opt("env", "") // comma-separated BOT_*=v for our bot
 const VERBOSE = argv.includes("--verbose")
-const DEATHLOG = argv.includes("--deathlog") // print what our bot was doing in its last seconds
+const DEATHLOG = argv.includes("--deathlog")
+// Full practice match: 15 house bots on the map from the start, the real shrinking zone, squad
+// hunting (one early, one more per kill, all of them after --late s), placement points as score.
+const FULL = argv.includes("--full")
+const LATE_T = Number(opt("late", "300"))
+const RETALIATE = Number(opt("retaliate", "1")) // 1: non-hunting house bots fight back when we attack them; 0: only hunters fight // print what our bot was doing in its last seconds
 const CUBES_A = Number(opt("cubes", "0")) // our starting power cubes: +4% max HP and damage each (up to 10)
 const DROPS = !argv.includes("--no-drops") // supply drops: stand in the ring alone for capture_s -> cubes + full repair
 const HUNTER_JUMP = Number(opt("hunter-jump", "0")) // chance per decision that a strafing hunter hops (jump + short jet)
@@ -133,6 +138,11 @@ class Mech {
   boostUntil = 0
   aimErr: [number, number] = [0, 0]
   jumpUntil = -1
+  hunting = false
+  provokedT = -99
+  roamTarget: number[] | null = null
+  roamPlan = -99
+  killedByZone = false
   constructor(public id: number, x: number, y: number, second: Weapon2) {
     this.pos = [x, y, world.groundAt(x, y)]
     this.second = second
@@ -234,6 +244,7 @@ function damage(target: Mech, shooter: Mech, amount: number, weapon: string, fro
   const rear = target.kind === "mech" && Math.abs(wrap(inc - target.aim[0])) > (M.front_arc_deg * Math.PI) / 360
   const dmg = amount * shooter.dmgMult * (rear ? M.rear_mult : 1) * (1 - target.armor)
   if (target.kind === "npc") target.aggroUntil = t + 10
+  if (target.kind === "mech" && target.id !== 0 && shooter.id === 0) target.provokedT = t
   target.hp -= dmg
   target.lastCombat = t
   shooter.lastCombat = t
@@ -317,8 +328,77 @@ function hunterThink(h: Mech, A: Mech, t: number) {
   }
 }
 
+// ---------- full match: zone and roaming house bots ----------
+type ZoneObsT = { center: number[]; radius: number; next_center: number[]; next_radius: number; shrink_start: number; shrink_end: number; dps: number }
+function makeZone() {
+  const phases = cfg.zone.phases as { hold_s: number; shrink_s: number; radius: number; dps: number }[]
+  const centers: number[][] = [cfg.zone.start_center]
+  const radii: number[] = [cfg.zone.start_radius]
+  const starts: number[] = []
+  const ends: number[] = []
+  let T = 0
+  for (const ph of phases) {
+    const c = centers[centers.length - 1]
+    const r = radii[radii.length - 1]
+    const slack = Math.max(0, r - ph.radius)
+    const a = rand() * TAU
+    const off = Math.sqrt(rand()) * slack
+    centers.push([c[0] + Math.cos(a) * off, c[1] + Math.sin(a) * off])
+    radii.push(ph.radius)
+    starts.push(T + ph.hold_s)
+    ends.push(T + ph.hold_s + ph.shrink_s)
+    T += ph.hold_s + ph.shrink_s
+  }
+  return (t: number): ZoneObsT => {
+    let k = starts.findIndex((_, i) => t < ends[i])
+    if (k < 0) k = phases.length - 1
+    const f = t <= starts[k] ? 0 : Math.min(1, (t - starts[k]) / (ends[k] - starts[k]))
+    const c0 = centers[k]
+    const c1 = centers[k + 1]
+    return {
+      center: [c0[0] + (c1[0] - c0[0]) * f, c0[1] + (c1[1] - c0[1]) * f], radius: radii[k] + (radii[k + 1] - radii[k]) * f,
+      next_center: c1, next_radius: radii[k + 1], shrink_start: starts[k], shrink_end: ends[k], dps: phases[k].dps,
+    }
+  }
+}
+/** A house bot that is not hunting us: stays well inside the zone and fights back only if we attack it. */
+function roamThink(h: Mech, A: Mech, t: number, z: ZoneObsT) {
+  const d = hyp2(h.pos, A.pos)
+  // non-hunters leave us alone unless we attacked them recently (the squad sends hunters for that)
+  void d
+  if (RETALIATE > 0 && t - h.provokedT < 10) return hunterThink(h, A, t)
+  const inSafe = (p: number[]) => hyp2(p, z.next_center) < z.next_radius * 0.6
+  if (!h.roamTarget || !inSafe(h.roamTarget) || hyp2(h.pos, h.roamTarget) < 6) {
+    for (let tries = 0; tries < 20; tries++) {
+      const a = rand() * TAU
+      const r = Math.sqrt(rand()) * z.next_radius * 0.5
+      const p = [z.next_center[0] + Math.cos(a) * r, z.next_center[1] + Math.sin(a) * r]
+      const [gi, gj] = world.navOf(p[0], p[1])
+      if (world.walkable(gi, gj)) {
+        h.roamTarget = p
+        break
+      }
+    }
+    h.roamPlan = -99
+  }
+  if (h.roamTarget && (t - h.roamPlan > 3 || h.path.length === 0)) {
+    h.path = world.path(h.pos[0], h.pos[1], h.roamTarget[0], h.roamTarget[1], 4000) ?? [[h.roamTarget[0], h.roamTarget[1]]]
+    h.roamPlan = t
+  }
+  while (h.path.length > 1 && hyp2(h.pos, h.path[0]) < 3) h.path.shift()
+  const wp = h.path[0] ?? h.roamTarget ?? h.pos
+  const far = hyp2(h.pos, wp) > 2
+  const yaw = Math.atan2(wp[1] - h.pos[1], wp[0] - h.pos[0])
+  h.move = far ? [Math.cos(yaw), Math.sin(yaw)] : [0, 0]
+  h.boost = far && hyp2(h.pos, z.center) > z.radius * 0.9 && h.energy > 20
+  h.cmdAim = [yaw, 0]
+  h.fire = false
+  h.fire2 = false
+  h.jump = false
+}
+
 // ---------- one run ----------
-type Result = { dropsCaptured: number; cubes: number; upgrades: string[]; dealtBy: Record<string, number>; shotsBy: Record<string, number>; takenBy: Record<string, number>; activeAtDeath: number; mortarAtDeath: number; hpAtFightStart: number[]; kills: number; time: number; taken: number; aHit: number; hHit: number; aShots: number; hShots: number; slowest: number; armedAt: number | null; armedWith: string }
+type Result = { points: number; place: number; dropsCaptured: number; cubes: number; upgrades: string[]; dealtBy: Record<string, number>; shotsBy: Record<string, number>; takenBy: Record<string, number>; activeAtDeath: number; mortarAtDeath: number; hpAtFightStart: number[]; kills: number; time: number; taken: number; aHit: number; hHit: number; aShots: number; hShots: number; slowest: number; armedAt: number | null; armedWith: string }
 
 async function run(runSeed: number): Promise<Result> {
   seed = runSeed
@@ -347,7 +427,17 @@ async function run(runSeed: number): Promise<Result> {
       if (world.walkable(gi, gj)) return [x, y]
     }
   }
-  const [ax, ay] = pick(0, -40, 0, 200)
+  const fullSpawns: [number, number][] = []
+  if (FULL) {
+    const c = cfg.zone.start_center
+    const R = cfg.zone.start_radius * cfg.match.spawn_zone_fraction
+    for (let tries = 0; fullSpawns.length < 16 && tries < 5000; tries++) {
+      const p = pick(c[0], c[1], 0, R)
+      if (fullSpawns.every((q) => hyp2(p, q) >= cfg.match.spawn_min_separation * (tries > 3000 ? 0.6 : 1))) fullSpawns.push(p)
+    }
+  }
+  const zoneAt = FULL ? makeZone() : null
+  const [ax, ay] = FULL ? fullSpawns[0] : pick(0, -40, 0, 200)
   const A = new Mech(0, ax, ay, WEAPON as Weapon2)
   const cubeMult = 1 + cfg.cubes.hp_per_cube * Math.min(CUBES_A, cfg.cubes.stat_cap)
   A.hp = A.maxHp = M.hp * cubeMult
@@ -489,13 +579,43 @@ async function run(runSeed: number): Promise<Result> {
   let tick = 0
   let slowest = 0
   const modeLog: string[] = []
-  const zone = { center: [ax, ay], radius: 2000, next_center: [ax, ay], next_radius: 1500, shrink_start: 9999, shrink_end: 9999, dps: 0 }
+  let zone: ZoneObsT = { center: [ax, ay], radius: 2000, next_center: [ax, ay], next_radius: 1500, shrink_start: 9999, shrink_end: 9999, dps: 0 }
+  let place = 0
+  const endT = FULL ? cfg.match.duration_s : TIME
+  const assignWeapon = (h: Mech) => {
+    if (!HUNTER_WEAPON && HUNTER_MIX) {
+      let r = rand()
+      for (const part of HUNTER_MIX.split(",")) {
+        const [k, v] = part.split(":")
+        if ((r -= Number(v)) < 0) {
+          h.second = k as Weapon2
+          break
+        }
+      }
+    } else if (!HUNTER_WEAPON && rand() < HUNTER_MORTAR) h.second = "mortar"
+  }
+  if (FULL) {
+    for (let i = 1; i < fullSpawns.length; i++) {
+      const h = new Mech(i, fullSpawns[i][0], fullSpawns[i][1], HUNTER_WEAPON as Weapon2)
+      h.type = TYPES[i - 1]
+      assignWeapon(h)
+      hunters.push(h)
+    }
+    sent = TYPES.length
+  }
 
-  while (t < TIME && A.hp > 0) {
+  while (t < endT && A.hp > 0 && (!FULL || hunters.some((h) => h.hp > 0))) {
+    if (FULL) {
+      zone = zoneAt!(t)
+      // squad: one early, one more per kill, weakest first; all of them late
+      const aliveH = hunters.filter((h) => h.hp > 0)
+      const wanted = t >= LATE_T ? aliveH.length : 1 + kills
+      aliveH.forEach((h, i) => (h.hunting = i < wanted))
+    }
     // squad: one early, more as we thin them out, weakest first
     const alive = hunters.filter((h) => h.hp > 0)
     const cap = Math.min(MAXACTIVE, 1 + Math.floor(kills / 2) + (t > 200 ? 1 : 0))
-    if (alive.length < cap && sent < TYPES.length && t - lastSpawn > 4) {
+    if (!FULL && alive.length < cap && sent < TYPES.length && t - lastSpawn > 4) {
       const [hx, hy] = pick(A.pos[0], A.pos[1], 160, 230)
       const h = new Mech(1 + sent, hx, hy, HUNTER_WEAPON as Weapon2)
       h.type = TYPES[sent]
@@ -531,7 +651,7 @@ async function run(runSeed: number): Promise<Result> {
         type: "obs", tick, t: +t.toFixed(2), alive: 1 + hunters.filter((h) => h.hp > 0).length + (TYPES.length - sent),
         self: { id: 0, pos: [...A.pos], vel: [...A.vel], aim: [...A.aim], hp: A.hp, max_hp: A.maxHp, energy: A.energy, max_energy: M.energy, grounded: A.grounded,
           cubes: A.cubes, upgrades: [...A.upgrades], weapons: [{ kind: "gun", cooldown: Math.max(0, A.cooldown), ammo: A.ammo, reload: Math.max(0, A.reload), stats: { ...W.gun, damage: W.gun.damage * A.gunDmgMul, cooldown: W.gun.cooldown * A.gunCdMul } }, second],
-          in_zone: true, stats: { radius: M.radius, height: M.height, eye_height: M.eye_height, muzzle_height: M.muzzle_height, walk_speed: M.walk_speed, boost_speed: M.boost_speed, turn_rate: M.turn_rate, hp: A.maxHp } },
+          in_zone: hyp2(A.pos, zone.center) <= zone.radius, stats: { radius: M.radius, height: M.height, eye_height: M.eye_height, muzzle_height: M.muzzle_height, walk_speed: M.walk_speed, boost_speed: M.boost_speed, turn_rate: M.turn_rate, hp: A.maxHp } },
         mechs: [
           ...visible.map((h) => ({ id: h.id, kind: "mech", pos: [...h.pos], vel: [...h.vel], aim: [...h.aim], hp: h.hp, max_hp: h.maxHp, cubes: 0, weapons: ["gun", ...(h.second ? [h.second] : [])], charging: h.charge > 0 })),
           ...visNpcs.map((n) => ({ id: n.id, kind: "npc", pos: [...n.pos], vel: [...n.vel], aim: [...n.aim], hp: n.hp, max_hp: n.maxHp })),
@@ -593,7 +713,7 @@ async function run(runSeed: number): Promise<Result> {
           if (VERBOSE) console.log(`  t=${t.toFixed(1)} took ${p.kind}`)
         }
       }
-      for (const h of hunters) if (h.hp > 0) hunterThink(h, A, t)
+      for (const h of hunters) if (h.hp > 0) (FULL && !h.hunting ? roamThink(h, A, t, zone) : hunterThink(h, A, t))
       // drones (protocol §7): shoot whoever attacks them, or mechs within aggro range while near home;
       // chase until the target is 90 m away or the drone is 60 m from home
       for (const n of npcs) {
@@ -767,13 +887,24 @@ async function run(runSeed: number): Promise<Result> {
         shells.splice(i, 1)
       } else s.p = q
     }
+    if (FULL && zone.dps > 0) {
+      for (const m of [A, ...hunters]) {
+        if (m.hp <= 0 || hyp2(m.pos, zone.center) <= zone.radius) continue
+        m.hp -= zone.dps * dt
+        m.lastCombat = t
+        m.takenBy.zone = (m.takenBy.zone ?? 0) + zone.dps * dt
+        if (m === A) A.events.push({ type: "damaged", amount: zone.dps * dt, weapon: "zone", bearing: null, by: null })
+        else if (m.hp <= 0) m.killedByZone = true
+      }
+    }
+    if (FULL && A.hp <= 0 && !place) place = 1 + hunters.filter((h) => h.hp > 0).length
     // deaths: a dead mech drops every weapon except the gun
     for (const h of hunters)
       if (h.hp <= 0 && !(h as any).counted) {
         ;(h as any).counted = true
         if (PICKUPS && h.second) pickups.push({ id: pickupId++, kind: h.second, pos: [...h.pos] })
         if (FARM) dropCubes(h.pos, cfg.cubes.death_drop_extra)
-        kills++
+        if (!h.killedByZone) kills++
         A.events.push({ type: "kill", target: h.id })
         if (VERBOSE) console.log(`  t=${t.toFixed(1)} killed ${h.type!.name} #${h.id}; A hp ${A.hp.toFixed(0)}`)
       }
@@ -791,7 +922,7 @@ async function run(runSeed: number): Promise<Result> {
     if (DROPS && cfg.drops) {
       for (const callT of cfg.drops.times as number[])
         if (t >= callT && !drops.some((d) => d.callT === callT)) {
-          const [x, y] = pick(ax, ay, 0, 250)
+          const [x, y] = FULL ? pick(zone.next_center[0], zone.next_center[1], 0, Math.max(10, zone.next_radius * 0.7)) : pick(ax, ay, 0, 250)
           drops.push({ id: 20000 + drops.length, pos: [x, y, world.groundAt(x, y)], callT, landT: callT + cfg.drops.fall_s, progress: 0, holder: null, taken: false })
         }
       for (const d of drops) {
@@ -849,7 +980,11 @@ async function run(runSeed: number): Promise<Result> {
   const hShots = hunters.reduce((a, h) => a + h.shots, 0)
   const hHits = hunters.reduce((a, h) => a + h.hits, 0)
   const activeH = hunters.filter((h) => h.hp > 0)
-  return { dropsCaptured, cubes: A.cubes, upgrades: A.upgrades, dealtBy: A.dealtBy, shotsBy: A.shotsBy, takenBy: A.takenBy, activeAtDeath: A.hp <= 0 ? activeH.length : -1, mortarAtDeath: activeH.filter((h) => h.second === "mortar").length, hpAtFightStart: [], kills, time: t, taken: A.taken, aHit: A.hits / Math.max(1, A.shots), hHit: hHits / Math.max(1, hShots), aShots: A.shots, hShots, slowest, armedAt, armedWith: A.second }
+  if (FULL && !place) {
+    // alive at the end (time out, or last one standing): survivors are ranked by HP
+    place = 1 + hunters.filter((h) => h.hp > 0 && h.hp > A.hp).length
+  }
+  return { points: FULL ? 16 - place : kills, place, dropsCaptured, cubes: A.cubes, upgrades: A.upgrades, dealtBy: A.dealtBy, shotsBy: A.shotsBy, takenBy: A.takenBy, activeAtDeath: A.hp <= 0 ? activeH.length : -1, mortarAtDeath: activeH.filter((h) => h.second === "mortar").length, hpAtFightStart: [], kills, time: t, taken: A.taken, aHit: A.hits / Math.max(1, A.shots), hHit: hHits / Math.max(1, hShots), aShots: A.shots, hShots, slowest, armedAt, armedWith: A.second }
 }
 
 const results: Result[] = []
@@ -876,4 +1011,10 @@ console.log(`supply drops captured per run: ${(results.reduce((a, r) => a + r.dr
 console.log(`cubes at death: mean ${(results.reduce((a, r) => a + r.cubes, 0) / results.length).toFixed(1)}; upgrades per run ${(results.reduce((a, r) => a + r.upgrades.length, 0) / results.length).toFixed(1)}`)
 const armed = results.filter((r) => r.armedAt !== null)
 console.log(`armed (laser or mortar) in ${armed.length}/${results.length} runs, median at ${armed.length ? armed.map((r) => r.armedAt!).sort((a, b) => a - b)[Math.floor(armed.length / 2)].toFixed(0) : "-"} s; holding at death: ${JSON.stringify(results.reduce((c: Record<string, number>, r) => ((c[r.armedWith || "none"] = (c[r.armedWith || "none"] ?? 0) + 1), c), {}))}`)
+if (FULL) {
+  const pl: Record<number, number> = {}
+  for (const r of results) pl[r.place] = (pl[r.place] ?? 0) + 1
+  console.log(`places: ${JSON.stringify(pl)}; survived to ${LATE_T} s (all hunt): ${results.filter((r) => r.time >= LATE_T).length}/${results.length}`)
+  console.log(`FULL points mean ${mean((r) => r.points).toFixed(2)} (kills mean ${mean((r) => r.kills).toFixed(2)})`)
+}
 console.log(`ARENA ${WEAPON || "gun"} ${ENV}: kills mean ${mean((r) => r.kills).toFixed(2)} (min ${Math.min(...results.map((r) => r.kills))}, max ${Math.max(...results.map((r) => r.kills))}), survived ${mean((r) => r.time).toFixed(0)} s, our hit% ${(mean((r) => r.aHit) * 100).toFixed(0)}, hunters' hit% ${(mean((r) => r.hHit) * 100).toFixed(0)}`)

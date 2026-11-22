@@ -133,6 +133,24 @@ const K = {
   // hitscan beam in under a second; step behind cover until it fires or stops charging.
   laserDodge: knob("LASER_DODGE", 0),
   laserDodgeAim: knob("LASER_DODGE_AIM", 0.1), // rad: how closely its aim must point at us
+  // Check six during reloads: the gun cannot fire for 2.4 s anyway, so swing the turret to look behind and
+  // back. Recorded matches: the best bot strikes first in 98% of its kills; ours ~41% (arena).
+  glance: knob("GLANCE", 0),
+  glanceSpread: knob("GLANCE_SPREAD", 2.6), // rad away from the target to look (pi = straight behind)
+  // Engage by time-to-kill vs time-to-die (utility-AI / RTS micro practice): keep fighting only if we
+  // would kill the target before the enemies that can see us kill us; otherwise disengage early.
+  ttk: knob("TTK", 0),
+  ttkMargin: knob("TTK_MARGIN", 1.0), // fight while ttk < ttd * margin
+  enemyHit: knob("ENEMY_HIT", 0.35), // assumed enemy gun hit rate (house bots: ~35-60%)
+  // Minimum-risk movement (Robocode melee): in fights, move to the nearby point with the lowest
+  // risk = sum(enemy strength / distance^2, reduced if it cannot see the point) + penalties.
+  minRisk: knob("MIN_RISK", 0),
+  minRiskShoot: knob("MIN_RISK_SHOOT", 1.0), // penalty weight if we could not shoot our target from the point
+  minRiskEvery: knob("MIN_RISK_EVERY", 5), // decisions between re-evaluations
+  // Cube discipline: above stat_cap (10) cubes add nothing but size (5% each, uncapped).
+  cubeMax: knob("CUBE_MAX", 999), // stop collecting cubes at this many
+  cubeFightMinHp: knob("CUBE_FIGHT_MIN_HP", 0), // no mid-fight cube runs below this HP fraction
+  dropMinHp: knob("DROP_MIN_HP", 0), // no drop rush below this HP fraction while an enemy is within 150 m
   dodge: knob("DODGE", 1), // move away from where an incoming mortar shell will land (arena: 0.93 -> 1.23 vs mortar hunters)
   dodgeMargin: knob("DODGE_MARGIN", 2), // extra metres beyond splash + our radius
   recoverHp: knob("RECOVER_HP", 0), // between fights: below this HP fraction, stay out of sight to regen (0 = off)
@@ -173,6 +191,7 @@ run((hello: Hello) => {
   let recovering = false
   let unseenHit: { bearing: number; until: number } | null = null
   let lastGlance = -99
+  let reloadGlance: { start: number; side: number } | null = null
   let laserHide: { from: number; spot: P2; until: number } | null = null
   let lastClearT = -99
   let fullSince: number | null = null
@@ -185,6 +204,8 @@ run((hello: Hello) => {
   let lastHunterSeen = -999
   let coverSpot: P2 | null = null
   let wallSpot: P2 | null = null
+  let riskSpot: P2 | null = null
+  let riskTick = -999
   let wallTick = -999
   let coverTick = -999
   let fightSpot: P2 | null = null
@@ -351,7 +372,7 @@ run((hello: Hello) => {
         lootSpots = lootSpots.filter((l) => t < l.until && d2(l.pos, pos) > 5)
       }
       /** Places with cubes: visible ones, remembered ones and our kill spots. */
-      const cubePlaces = (): Vec3[] => K.cubeMemory > 0 ? [...obs.cubes.map((c) => c.pos), ...knownCubes.values(), ...lootSpots.map((l) => l.pos)] : obs.cubes.map((c) => c.pos)
+      const cubePlaces = (): Vec3[] => me.cubes >= K.cubeMax ? [] : K.cubeMemory > 0 ? [...obs.cubes.map((c) => c.pos), ...knownCubes.values(), ...lootSpots.map((l) => l.pos)] : obs.cubes.map((c) => c.pos)
 
       // ---- upgrades ----
       if (obs.offer) {
@@ -362,7 +383,10 @@ run((hello: Hello) => {
         // mode 4: what top-4 finishers chose most in recorded public matches (22 matches)
         // mode 6: sensors second (+15 m all-round sensing: hunters like to sit at ~55 m, just outside 45 m)
         // mode 7: laser_charge first when holding a laser (the strongest team bot's favourite pick)
-        const order = K.upgMode === 7 ? (me.weapons.some((w) => w?.kind === "laser") ? ["laser_charge", ...base.filter((u) => u !== "laser_charge")] : base)
+        // mode 8: gun mechanics early (faster bullets hit dodging targets, bigger magazine, shorter reload)
+        const GUN_EARLY = ["gun_velocity", "gun_mag"]
+        const order = K.upgMode === 8 ? [base[0], ...GUN_EARLY, ...base.slice(1).filter((u) => !GUN_EARLY.includes(u))]
+          : K.upgMode === 7 ? (me.weapons.some((w) => w?.kind === "laser") ? ["laser_charge", ...base.filter((u) => u !== "laser_charge")] : base)
           : K.upgMode === 4 ? REAL_WINNER_ORDER
           : K.upgMode === 6 ? [base[0], "sensors", ...base.slice(1).filter((u) => u !== "sensors")]
           : first ? [first, ...base.filter((u) => u !== first)] : base
@@ -491,12 +515,36 @@ run((hello: Hello) => {
         if (hpFrac >= K.recoverTo) recovering = false
       }
       const recover = recovering && closest > K.recoverRange
-      const retreat = (threatened || recover) && (K.pacifist > 0 || recover || (hpFrac < K.retreatHp && targetFrac >= hpFrac) || near.length >= K.retreatN)
+      // time-to-kill vs time-to-die
+      let losingTrade = false
+      if (K.ttk > 0 && target) {
+        const cubeMul = 1 + (cfg.cubes.damage_per_cube as number) * Math.min(me.cubes, cfg.cubes.stat_cap as number)
+        const g = me.weapons[0]?.stats ?? cfg.weapons.gun
+        const gunDps = ((g.damage ?? 45) / (g.cooldown ?? 0.24)) * 0.8 * ((g.mag ?? 12) * (g.cooldown ?? 0.24)) / ((g.mag ?? 12) * (g.cooldown ?? 0.24) + (g.reload ?? 2.4))
+        const L = me.weapons[1]?.kind === "laser" ? me.weapons[1].stats : null
+        const laserDps = L ? (L.damage ?? 315) / ((L.charge ?? 0.75) + (L.cooldown ?? 1.65)) : 0
+        const ourDps = (gunDps + laserDps) * cubeMul
+        const ttkS = (target.hp ?? 1400) / Math.max(1, ourDps)
+        let inDps = 0
+        for (const m of mechs) {
+          if (d2(m.pos, pos) > 260) continue
+          const em = 1 + (cfg.cubes.damage_per_cube as number) * Math.min(m.cubes ?? 0, cfg.cubes.stat_cap as number)
+          let dps = (45 / 0.24) * 0.7 * K.enemyHit
+          if (m.weapons?.includes("laser")) dps += (315 / 2.4) * 0.9
+          if (m.weapons?.includes("mortar")) dps += 40
+          inDps += dps * em
+        }
+        const armor = 1 - (me.stats.armor ?? 0)
+        const ttdS = me.hp / Math.max(1, inDps * armor)
+        losingTrade = ttkS > ttdS * K.ttkMargin
+      }
+      const retreat = (threatened || recover) && (K.pacifist > 0 || recover || (K.ttk > 0 ? losingTrade : (hpFrac < K.retreatHp && targetFrac >= hpFrac) || near.length >= K.retreatN))
       const safeR = obs.zone.next_radius * 0.6
       const insideSafe = (p: number[]) => d2(p, obs.zone.next_center) <= Math.max(safeR, 15)
 
       // a supply drop worth rushing: landing soon, close enough, nobody else capturing it
-      const rushDrop = K.dropRush > 0 && hpFrac < K.dropMaxHp
+      const enemyClose = obs.mechs.some((m) => m.kind === "mech" && d2(m.pos, pos) < 150)
+      const rushDrop = K.dropRush > 0 && hpFrac < K.dropMaxHp && !(enemyClose && hpFrac < K.dropMinHp)
         ? (obs.drops ?? []).filter((d) => d.lands_in <= K.dropLead && d2(d.pos, pos) < K.dropRange && (d.holder === null || d.holder === me.id))
             .sort((a, b) => d2(a.pos, pos) - d2(b.pos, pos))[0]
         : undefined
@@ -622,6 +670,49 @@ run((hello: Hello) => {
             mode = "mortar cover"
           }
         } else coverSpot = null
+        if (K.minRisk > 0 && !light && elapsed() < 12 && mode !== "mortar cover" && mode !== "fight→cube") {
+          if (!riskSpot || tick - riskTick >= K.minRiskEvery * cfg.match.decide_every || d2(pos, riskSpot) < 2) {
+            const tc = center(target!)
+            const foes = [...mechs].sort((a, b) => d2(a.pos, pos) - d2(b.pos, pos)).filter((m) => d2(m.pos, pos) < 300).slice(0, 4)
+            const strength = (m: ActorObs) => (1 + (cfg.cubes.damage_per_cube as number) * Math.min(m.cubes ?? 0, 10)) *
+              (1 + (m.weapons?.includes("laser") ? 0.7 : 0) + (m.weapons?.includes("mortar") ? 0.3 : 0)) * Math.max(0.2, (m.hp ?? 1400) / Math.max(1, m.max_hp ?? 1400))
+            const risk = (c: P2, r: number) => {
+              const gz = world.groundAt(c[0], c[1])
+              const body: Vec3 = [c[0], c[1], gz + 4.5]
+              let v = 0
+              for (const m of foes) {
+                const dd = Math.max(20, d2(m.pos, c))
+                const sees = world.clear([m.pos[0], m.pos[1], m.pos[2] + 8], body, 5)
+                v += (strength(m) * (sees ? 1 : 0.3) * 10000) / (dd * dd)
+              }
+              if (!world.clear([c[0], c[1], gz + 7], tc, 4)) v += K.minRiskShoot
+              if (r === 0) v += 0.3 // standing still is risky too
+              return v + rand() * 0.15
+            }
+            let best: P2 | null = null
+            let bestV = Infinity
+            for (let k = 0; k < 12; k++) {
+              const a = (k / 12) * TAU
+              for (const r of [0, 15, 30]) {
+                if (r === 0 && k > 0) continue
+                const c: P2 = [pos[0] + Math.cos(a) * r, pos[1] + Math.sin(a) * r]
+                const [gi, gj] = world.navOf(c[0], c[1])
+                if (!world.walkable(gi, gj) || !insideSafe(c)) continue
+                const v = risk(c, r)
+                if (v < bestV) {
+                  bestV = v
+                  best = c
+                }
+              }
+            }
+            riskSpot = best
+            riskTick = tick
+          }
+          if (riskSpot) {
+            goal = riskSpot
+            mode = "min risk"
+          }
+        } else riskSpot = null
         if (K.backWall > 0 && !light && mode !== "mortar cover") {
           if (!wallSpot || tick - wallTick >= K.backWallEvery * cfg.match.decide_every || d2(pos, wallSpot) < 2) {
             const tc = center(target!)
@@ -662,7 +753,7 @@ run((hello: Hello) => {
         // Unarmed: a laser or mortar on the ground nearby is worth more than strafing in place
         // (arena: about a quarter of runs end with only the gun, the weakest setup by far).
         // cubes lying near us (usually from the kill we just made): grab them while still fighting
-        if (K.cubeFight > 0) {
+        if (K.cubeFight > 0 && hpFrac >= K.cubeFightMinHp) {
           const c = cubePlaces().filter((q) => d2(q, pos) < K.cubeFight && Math.abs(q[2] - pos[2]) < 4).sort((a, b) => d2(a, pos) - d2(b, pos))[0]
           if (c) {
             goal = [c[0], c[1]]
@@ -792,7 +883,7 @@ run((hello: Hello) => {
       } else {
         // Race for a laser on the ground (a roof one needs the energy for the climb).
         const rushLaser = goingFor?.kind === "laser" && goingFor.pos[2] <= world.groundAt(goingFor.pos[0], goingFor.pos[1]) + 3 && d2(pos, goal) > 8
-        act.boost = (me.energy > 30 && (mode === "zone!" || mode === "retreat" || (mode === "to zone" && d2(pos, goal) > 60) || (K.boostFight > 0 && mode === "fight" && me.energy > K.boostFight) || (mode === "kite" && me.energy > K.kiteBoost) || (mode === "split pack" && me.energy > K.boostFight) || (mode === "drop rush" && me.energy > 30))) || (rushLaser && me.energy > 15)
+        act.boost = (me.energy > 30 && (mode === "zone!" || mode === "retreat" || (mode === "to zone" && d2(pos, goal) > 60) || (K.boostFight > 0 && mode === "fight" && me.energy > K.boostFight) || (mode === "kite" && me.energy > K.kiteBoost) || (mode === "split pack" && me.energy > K.boostFight) || (mode === "min risk" && me.energy > K.boostFight) || (mode === "drop rush" && me.energy > 30))) || (rushLaser && me.energy > 15)
       }
 
       // ---- climbing to a roof weapon (protocol.md §7: jump, jet until the feet clear the edge) ----
@@ -1051,6 +1142,19 @@ run((hello: Hello) => {
       }
       // reload while nothing to shoot
       if (gun && !shootAt && (gun.ammo ?? 12) < (gun.stats.mag ?? 12) * 0.5 && (gun.reload ?? 0) <= 0) act.reload = true
+
+      // check six while the gun reloads (unless a laser charge needs the turret on target)
+      if (K.glance > 0 && target && gun && (gun.reload ?? 0) > 0 && !((second?.kind === "laser") && (second.charge ?? 0) > 0)) {
+        if (!reloadGlance) reloadGlance = { start: t, side: rand() < 0.5 ? 1 : -1 }
+        const el = t - reloadGlance.start
+        const reloadLeft = gun.reload ?? 0
+        // out, hold briefly, and be back on target by the time the reload ends
+        if (reloadLeft > 0.9 && el < 1.4) {
+          aimYaw = yawTo(pos, target.pos) + reloadGlance.side * K.glanceSpread
+          aimPitch = 0
+          fire[0] = false
+        }
+      } else if (reloadGlance && (gun?.reload ?? 0) <= 0) reloadGlance = null
 
       // an unseen attacker is shooting our back: look at it (gun holds fire while we turn; a laser charge is kept)
       if (K.rearTurn > 0 && unseenHit && t < unseenHit.until) {

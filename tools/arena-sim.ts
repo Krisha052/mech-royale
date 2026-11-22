@@ -42,6 +42,11 @@ const DROPS = !argv.includes("--no-drops") // supply drops: stand in the ring al
 const HUNTER_JUMP = Number(opt("hunter-jump", "0")) // chance per decision that a strafing hunter hops (jump + short jet)
 const HUNTER_CUBES = Number(opt("hunter-cubes", "0")) // hunters carry ~t/this cubes (+0-2) when they arrive, up to 10 (0 = none)
 const SOUNDS = !argv.includes("--no-sounds") // hunters' gunfire, laser charging and footsteps, as obs.sounds (protocol §8)
+// Hunters' strafe direction changes every FLIP_MIN + rand * FLIP_RAND s (real house bots are less predictable
+// than the original 1 + 1.5 rand; calibrate with --predict-stats against tools/live recordings)
+const HFLIP = (opt("hunter-flip", "1,1.5")).split(",").map(Number)
+const HJINK = Number(opt("hunter-jink", "0")) // sideways weave strength while hunters approach (0 = straight)
+const PREDICT_STATS = argv.includes("--predict-stats") // measure how predictable hunters' movement is (full-lead hit chance by flight time)
 const SHOW_BULLETS = !argv.includes("--no-bullets") // visible enemy gun bullets in obs.projectiles, as the real server sends
 const FARM = !argv.includes("--no-farm") // drones, crates, power cubes and upgrade offers
 const PICKUPS = !argv.includes("--no-pickups") // floor weapons and hunter death drops (protocol §7 Weapon loot)
@@ -130,6 +135,15 @@ class Mech {
   chargeMul = 1
   gunDmgMul = 1
   gunCdMul = 1
+  // remaining upgrade effects (gun_mag, gun_velocity, servos, capacitor, reactor, jets)
+  magAdd = 0
+  reloadMul = 1
+  gunSpeedMul = 1
+  gunRangeMul = 1
+  speedMul = 1
+  energyMax = M.energy
+  energyRegenMul = 1
+  drainMul = 1
   upgrades: string[] = []
   nearBonus = 0 // sensors upgrade: +15 m proximity
   visionBonus = 0 // sensors upgrade: +25 m vision range
@@ -155,10 +169,10 @@ class Mech {
     return [this.pos[0], this.pos[1], this.pos[2] + this.height / 2]
   }
   eye(): number[] {
-    return [this.pos[0], this.pos[1], this.pos[2] + M.eye_height]
+    return [this.pos[0], this.pos[1], this.pos[2] + M.eye_height * (this.height / M.height)]
   }
   muzzle(): number[] {
-    return [this.pos[0], this.pos[1], this.pos[2] + M.muzzle_height]
+    return [this.pos[0], this.pos[1], this.pos[2] + M.muzzle_height * (this.height / M.height)]
   }
 }
 
@@ -183,7 +197,7 @@ function physics(m: Mech, t: number) {
   const L = Math.hypot(m.move[0], m.move[1])
   const mv = L > 1 ? [m.move[0] / L, m.move[1] / L] : m.move
   const boosting = m.boost && m.energy > 0 && (L > 0.1 || !m.grounded)
-  const spd = (boosting && m.grounded ? M.boost_speed : M.walk_speed) * (m.charge > 0 ? M.charge_move_mult : 1)
+  const spd = (boosting && m.grounded ? M.boost_speed : M.walk_speed) * m.speedMul * (m.charge > 0 ? M.charge_move_mult : 1)
   const acc = (m.grounded ? M.ground_accel : M.air_accel) * dt
   for (const k of [0, 1]) {
     const dv = mv[k] * spd - m.vel[k]
@@ -195,9 +209,9 @@ function physics(m: Mech, t: number) {
   }
   if (boosting && !m.grounded) m.vel[2] = Math.min(M.max_rise_speed, m.vel[2] + M.jet_accel * dt)
   if (boosting) {
-    m.energy = Math.max(0, m.energy - (m.grounded ? M.boost_drain : M.jet_drain) * dt)
+    m.energy = Math.max(0, m.energy - (m.grounded ? M.boost_drain : M.jet_drain) * m.drainMul * dt)
     m.lastSpend = t
-  } else if (t - m.lastSpend > M.energy_regen_delay) m.energy = Math.min(M.energy, m.energy + M.energy_regen * dt)
+  } else if (t - m.lastSpend > M.energy_regen_delay) m.energy = Math.min(m.energyMax, m.energy + M.energy_regen * m.energyRegenMul * dt)
   m.vel[2] -= M.gravity * dt
   const tryAt = (x: number, y: number) => {
     const stand = world.standZ(x, y, m.pos[2])
@@ -254,6 +268,7 @@ function damage(target: Mech, shooter: Mech, amount: number, weapon: string, fro
   shooter.lastCombat = t
   target.taken += dmg
   target.takenBy[weapon] = (target.takenBy[weapon] ?? 0) + dmg
+  if ((shooter.id === 0 && target.kind === "mech") || (target.id === 0 && shooter.kind === "mech")) fightHits.push([t, shooter.id, target.id, dmg])
   if (rear) target.takenBy.REAR = (target.takenBy.REAR ?? 0) + dmg
   if (rear && target.id === 0 && shooter.kind === "mech") {
     const seen = (ourSeenUntil.get(shooter.id) ?? -1) >= t
@@ -272,6 +287,9 @@ function damage(target: Mech, shooter: Mech, amount: number, weapon: string, fro
   shooter.events.push({ type: "hit", target: target.id, amount: dmg, weapon, rear })
 }
 
+// every hit between our bot (id 0) and hunters: [t, src, dst, amount]
+let fightHits: [number, number, number, number][] = []
+const predictCounts: Record<number, [number, number]> = {}
 // shared with damage(): which hunters our bot currently sees or remembers (memory_s)
 let ourSeenUntil = new Map<number, number>()
 // ---------- vision (what our bot sees) ----------
@@ -299,11 +317,19 @@ function hunterThink(h: Mech, A: Mech, t: number) {
     const wp = h.path[0] ?? [A.pos[0], A.pos[1]]
     const yaw = Math.atan2(wp[1] - h.pos[1], wp[0] - h.pos[0])
     h.move = [Math.cos(yaw), Math.sin(yaw)]
+    if (HJINK > 0) {
+      if (t > h.nextFlip) {
+        h.strafe = rand() < 0.5 ? -1 : 1
+        h.nextFlip = t + 0.5 + rand()
+      }
+      const side = yaw + (h.strafe * Math.PI) / 2
+      h.move = [h.move[0] + Math.cos(side) * HJINK, h.move[1] + Math.sin(side) * HJINK]
+    }
     h.boost = d > 120 && h.energy > 30
   } else {
     if (t > h.nextFlip) {
       h.strafe = rand() < 0.5 ? -1 : 1
-      h.nextFlip = t + 1 + rand() * 1.5
+      h.nextFlip = t + HFLIP[0] + rand() * HFLIP[1]
     }
     const side = toA + (h.strafe * Math.PI) / 2
     const radial = d > want + 10 ? 0.5 : d < want - 15 ? -0.5 : 0
@@ -415,7 +441,7 @@ function roamThink(h: Mech, A: Mech, t: number, z: ZoneObsT) {
 }
 
 // ---------- one run ----------
-type Result = { laserStat?: { shootable: number; charging: number; readyIdle: number; cooling: number }; points: number; place: number; dropsCaptured: number; cubes: number; upgrades: string[]; dealtBy: Record<string, number>; shotsBy: Record<string, number>; takenBy: Record<string, number>; activeAtDeath: number; mortarAtDeath: number; hpAtFightStart: number[]; kills: number; time: number; taken: number; aHit: number; hHit: number; aShots: number; hShots: number; slowest: number; armedAt: number | null; armedWith: string }
+type Result = { fights?: { dur: number; taken: number; first: boolean; hp: number }[]; laserStat?: { shootable: number; charging: number; readyIdle: number; cooling: number }; points: number; place: number; dropsCaptured: number; cubes: number; upgrades: string[]; dealtBy: Record<string, number>; shotsBy: Record<string, number>; takenBy: Record<string, number>; activeAtDeath: number; mortarAtDeath: number; hpAtFightStart: number[]; kills: number; time: number; taken: number; aHit: number; hHit: number; aShots: number; hShots: number; slowest: number; armedAt: number | null; armedWith: string }
 
 async function run(runSeed: number): Promise<Result> {
   seed = runSeed
@@ -537,6 +563,9 @@ async function run(runSeed: number): Promise<Result> {
   }
   A.cubes = CUBES_A
   const applyCubes = () => {
+    const grow = 1 + (cfg.cubes.size_per_cube as number) * A.cubes // bigger with every cube, no cap
+    A.radius = M.radius * grow
+    A.height = M.height * grow
     const c = Math.min(A.cubes, cfg.cubes.stat_cap)
     const newMax = M.hp * (1 + cfg.cubes.hp_per_cube * c) * A.hpMul
     A.hp += Math.max(0, newMax - A.maxHp)
@@ -575,6 +604,16 @@ async function run(runSeed: number): Promise<Result> {
     else if (id === "laser_charge") A.chargeMul *= 0.75
     else if (id === "gun_damage") A.gunDmgMul *= 1.15
     else if (id === "gun_rate") A.gunCdMul *= 0.87
+    else if (id === "gun_mag") {
+      A.magAdd += 8
+      A.reloadMul *= 0.8
+    } else if (id === "gun_velocity") {
+      A.gunSpeedMul *= 1.25
+      A.gunRangeMul *= 1.15
+    } else if (id === "servos") A.speedMul *= 1.08
+    else if (id === "capacitor") A.energyMax += 30
+    else if (id === "reactor") A.energyRegenMul *= 1.3
+    else if (id === "jets") A.drainMul *= 0.75
     else if (id === "sensors") {
       A.nearBonus += 15
       A.visionBonus += 25
@@ -601,7 +640,12 @@ async function run(runSeed: number): Promise<Result> {
   let tick = 0
   let slowest = 0
   const modeLog: string[] = []
+  const hunterTrack = new Map<number, Map<number, [number, number, number, number]>>() // id -> decision index -> [x, y, vx, vy]
+  const fightsLog: { dur: number; taken: number; first: boolean; hp: number }[] = []
+  const hpAtFirst = new Map<number, number>()
   const laserStat = { shootable: 0, charging: 0, readyIdle: 0, cooling: 0 }
+  // fight log for "who struck first" analysis: every hit between our bot and a hunter
+  fightHits = []
   const soundLog: { kind: string; pos: number[]; t: number }[] = []
   const stepAt = new Map<number, number>()
   let zone: ZoneObsT = { center: [ax, ay], radius: 2000, next_center: [ax, ay], next_radius: 1500, shrink_start: 9999, shrink_end: 9999, dps: 0 }
@@ -646,6 +690,8 @@ async function run(runSeed: number): Promise<Result> {
         h.cubes = Math.min(10, Math.floor(t / HUNTER_CUBES + rand() * 2))
         h.hp = h.maxHp = M.hp * (1 + cfg.cubes.hp_per_cube * h.cubes)
         h.dmgMult = 1 + cfg.cubes.damage_per_cube * h.cubes
+        h.radius = M.radius * (1 + (cfg.cubes.size_per_cube as number) * h.cubes)
+        h.height = M.height * (1 + (cfg.cubes.size_per_cube as number) * h.cubes)
       }
       const [hx, hy] = pick(A.pos[0], A.pos[1], 160, 230)
       const h = new Mech(1 + sent, hx, hy, HUNTER_WEAPON as Weapon2)
@@ -681,9 +727,9 @@ async function run(runSeed: number): Promise<Result> {
         : null
       send({
         type: "obs", tick, t: +t.toFixed(2), alive: 1 + hunters.filter((h) => h.hp > 0).length + (TYPES.length - sent),
-        self: { id: 0, pos: [...A.pos], vel: [...A.vel], aim: [...A.aim], hp: A.hp, max_hp: A.maxHp, energy: A.energy, max_energy: M.energy, grounded: A.grounded,
-          cubes: A.cubes, upgrades: [...A.upgrades], weapons: [{ kind: "gun", cooldown: Math.max(0, A.cooldown), ammo: A.ammo, reload: Math.max(0, A.reload), stats: { ...W.gun, damage: W.gun.damage * A.gunDmgMul, cooldown: W.gun.cooldown * A.gunCdMul } }, second],
-          in_zone: hyp2(A.pos, zone.center) <= zone.radius, stats: { radius: M.radius, height: M.height, eye_height: M.eye_height, muzzle_height: M.muzzle_height, walk_speed: M.walk_speed, boost_speed: M.boost_speed, turn_rate: M.turn_rate, hp: A.maxHp } },
+        self: { id: 0, pos: [...A.pos], vel: [...A.vel], aim: [...A.aim], hp: A.hp, max_hp: A.maxHp, energy: A.energy, max_energy: A.energyMax, grounded: A.grounded,
+          cubes: A.cubes, upgrades: [...A.upgrades], weapons: [{ kind: "gun", cooldown: Math.max(0, A.cooldown), ammo: A.ammo, reload: Math.max(0, A.reload), stats: { ...W.gun, damage: W.gun.damage * A.gunDmgMul, cooldown: W.gun.cooldown * A.gunCdMul, mag: W.gun.mag + A.magAdd, reload: W.gun.reload * A.reloadMul, speed: W.gun.speed * A.gunSpeedMul, range: W.gun.range * A.gunRangeMul } }, second],
+          in_zone: hyp2(A.pos, zone.center) <= zone.radius, stats: { radius: A.radius, height: A.height, eye_height: M.eye_height * (A.height / M.height), muzzle_height: M.muzzle_height * (A.height / M.height), walk_speed: M.walk_speed * A.speedMul, boost_speed: M.boost_speed * A.speedMul, turn_rate: M.turn_rate, hp: A.maxHp, armor: A.armor } },
         mechs: [
           ...visible.map((h) => ({ id: h.id, kind: "mech", pos: [...h.pos], vel: [...h.vel], aim: [...h.aim], hp: h.hp, max_hp: h.maxHp, cubes: 0, weapons: ["gun", ...(h.second ? [h.second] : [])], charging: h.charge > 0 })),
           ...visNpcs.map((n) => ({ id: n.id, kind: "npc", pos: [...n.pos], vel: [...n.vel], aim: [...n.aim], hp: n.hp, max_hp: n.maxHp })),
@@ -722,6 +768,7 @@ async function run(runSeed: number): Promise<Result> {
       A.fire = !!act.fire?.[0]
       A.fire2 = !!act.fire?.[1]
       A.wantReload = !!act.reload
+      for (const x of fightHits) if (x[1] === 0 && !hpAtFirst.has(x[2])) hpAtFirst.set(x[2], A.hp / A.maxHp)
       if (A.second === "laser") {
         const canShoot = hunters.some((h) => h.hp > 0 && hyp2(h.pos, A.pos) < W.laser.range - 10 && world.clear(A.muzzle(), h.center(), 3))
         if (canShoot) {
@@ -767,6 +814,13 @@ async function run(runSeed: number): Promise<Result> {
             soundLog.push({ kind: h.boost ? "boost" : "step", pos: [...h.pos], t })
           }
         }
+      if (PREDICT_STATS)
+        for (const h of hunters) {
+          if (h.hp <= 0) continue
+          let tr = hunterTrack.get(h.id)
+          if (!tr) hunterTrack.set(h.id, (tr = new Map()))
+          tr.set(tick / cfg.match.decide_every, [h.pos[0], h.pos[1], h.vel[0], h.vel[1]])
+        }
       for (const h of hunters) if (h.hp > 0) (FULL && !h.hunting ? roamThink(h, A, t, zone) : hunterThink(h, A, t))
       // drones (protocol §7): shoot whoever attacks them, or mechs within aggro range while near home;
       // chase until the target is 90 m away or the drone is 60 m from home
@@ -797,9 +851,9 @@ async function run(runSeed: number): Promise<Result> {
       m.cooldown -= dt
       if (m.reload > 0) {
         m.reload -= dt
-        if (m.reload <= 0) m.ammo = W.gun.mag
-      } else if (m.wantReload && m.ammo < W.gun.mag) {
-        m.reload = W.gun.reload
+        if (m.reload <= 0) m.ammo = W.gun.mag + m.magAdd
+      } else if (m.wantReload && m.ammo < W.gun.mag + m.magAdd) {
+        m.reload = W.gun.reload * m.reloadMul
         m.wantReload = false
       }
       if (m.fire && m.cooldown <= 0 && m.reload <= 0 && m.ammo > 0) {
@@ -808,13 +862,13 @@ async function run(runSeed: number): Promise<Result> {
         const pit = m.aim[1] + gauss() * sd
         const d = [Math.cos(pit) * Math.cos(yaw), Math.cos(pit) * Math.sin(yaw), Math.sin(pit)]
         const mz = m.muzzle()
-        bullets.push({ owner: m, p: [mz[0] + d[0] * 3, mz[1] + d[1] * 3, mz[2] + d[2] * 3], v: d.map((c) => c * W.gun.speed), trav: 0, dmg: W.gun.damage * m.gunDmgMul, speed: W.gun.speed, range: W.gun.range })
+        bullets.push({ owner: m, p: [mz[0] + d[0] * 3, mz[1] + d[1] * 3, mz[2] + d[2] * 3], v: d.map((c) => c * W.gun.speed * m.gunSpeedMul), trav: 0, dmg: W.gun.damage * m.gunDmgMul, speed: W.gun.speed * m.gunSpeedMul, range: W.gun.range * m.gunRangeMul })
         m.cooldown = W.gun.cooldown * m.gunCdMul
         m.ammo--
         m.shots++
         m.shotsBy.gun = (m.shotsBy.gun ?? 0) + 1
         if (SOUNDS && m !== A && m.kind === "mech") soundLog.push({ kind: "gun", pos: [...m.pos], t })
-        if (m.ammo === 0) m.reload = W.gun.reload
+        if (m.ammo === 0) m.reload = W.gun.reload * m.reloadMul
       }
       // second weapons (ours: laser / mortar / lightning; hunters: mortar)
       m.cool2 -= dt
@@ -962,7 +1016,17 @@ async function run(runSeed: number): Promise<Result> {
         ;(h as any).counted = true
         if (PICKUPS && h.second) pickups.push({ id: pickupId++, kind: h.second, pos: [...h.pos] })
         if (FARM) dropCubes(h.pos, cfg.cubes.death_drop_extra + h.cubes)
-        if (!h.killedByZone) kills++
+        if (!h.killedByZone) {
+          kills++
+          const ours = fightHits.filter((x) => x[1] === 0 && x[2] === h.id)
+          if (ours.length) {
+            let t0 = ours[ours.length - 1][0]
+            for (let i = ours.length - 2; i >= 0 && t0 - ours[i][0] < 6; i--) t0 = ours[i][0]
+            const taken = fightHits.filter((x) => x[2] === 0 && x[0] >= t0 && x[0] <= t).reduce((a, x) => a + x[3], 0)
+            const first = !fightHits.some((x) => x[1] === h.id && x[2] === 0 && x[0] < t0 && x[0] >= t0 - 6)
+            fightsLog.push({ dur: t - t0, taken, first, hp: hpAtFirst.get(h.id) ?? 1 })
+          }
+        }
         A.events.push({ type: "kill", target: h.id })
         if (VERBOSE) console.log(`  t=${t.toFixed(1)} killed ${h.type!.name} #${h.id}; A hp ${A.hp.toFixed(0)}`)
       }
@@ -1017,6 +1081,19 @@ async function run(runSeed: number): Promise<Result> {
     t += dt
     tick++
   }
+  if (PREDICT_STATS)
+    for (const tr of hunterTrack.values())
+      for (const [k0, p] of tr) {
+        if (Math.hypot(p[2], p[3]) < 0.5) continue
+        for (let hz = 2; hz <= 9; hz++) {
+          const q = tr.get(k0 + hz)
+          if (!q) continue
+          const miss = Math.hypot(q[0] - p[0] - (p[2] * hz) / 10, q[1] - p[1] - (p[3] * hz) / 10)
+          const c = (predictCounts[hz] ??= [0, 0])
+          c[0] += miss < 2.8 ? 1 : 0
+          c[1]++
+        }
+      }
   if (DEATHLOG && A.hp <= 0) {
     const alive = hunters.filter((h) => h.hp > 0)
     console.log(`--- died at ${t.toFixed(1)} s, kills ${kills}, cubes ${A.cubes}, holding ${A.second || "gun only"}; hunters alive ${alive.length}: ${alive.map((h) => `${h.type!.name}/${h.second || "gun"} at ${hyp2(h.pos, A.pos).toFixed(0)}m`).join(", ")}`)
@@ -1042,7 +1119,7 @@ async function run(runSeed: number): Promise<Result> {
     // alive at the end (time out, or last one standing): survivors are ranked by HP
     place = 1 + hunters.filter((h) => h.hp > 0 && h.hp > A.hp).length
   }
-  return { laserStat, points: FULL ? 16 - place : kills, place, dropsCaptured, cubes: A.cubes, upgrades: A.upgrades, dealtBy: A.dealtBy, shotsBy: A.shotsBy, takenBy: A.takenBy, activeAtDeath: A.hp <= 0 ? activeH.length : -1, mortarAtDeath: activeH.filter((h) => h.second === "mortar").length, hpAtFightStart: [], kills, time: t, taken: A.taken, aHit: A.hits / Math.max(1, A.shots), hHit: hHits / Math.max(1, hShots), aShots: A.shots, hShots, slowest, armedAt, armedWith: A.second }
+  return { fights: fightsLog, laserStat, points: FULL ? 16 - place : kills, place, dropsCaptured, cubes: A.cubes, upgrades: A.upgrades, dealtBy: A.dealtBy, shotsBy: A.shotsBy, takenBy: A.takenBy, activeAtDeath: A.hp <= 0 ? activeH.length : -1, mortarAtDeath: activeH.filter((h) => h.second === "mortar").length, hpAtFightStart: [], kills, time: t, taken: A.taken, aHit: A.hits / Math.max(1, A.shots), hHit: hHits / Math.max(1, hShots), aShots: A.shots, hShots, slowest, armedAt, armedWith: A.second }
 }
 
 const results: Result[] = []
@@ -1072,6 +1149,14 @@ console.log(`cubes at death: mean ${(results.reduce((a, r) => a + r.cubes, 0) / 
   for (const r of results) if (r.laserStat) for (const k of Object.keys(ls) as (keyof typeof ls)[]) ls[k] += r.laserStat[k]
   if (ls.shootable) console.log(`laser while a hunter is shootable: charging ${(100 * ls.charging / ls.shootable).toFixed(0)}%, cooling down ${(100 * ls.cooling / ls.shootable).toFixed(0)}%, READY BUT IDLE ${(100 * ls.readyIdle / ls.shootable).toFixed(0)}%  (${(ls.shootable / 10 / results.length).toFixed(0)} s shootable per run)`)
 }
+{
+  const fs = results.flatMap((r) => r.fights ?? [])
+  if (fs.length) {
+    const med = (a: number[]) => [...a].sort((x, y) => x - y)[Math.floor(a.length / 2)]
+    console.log(`our kills: ${fs.length}; fight length median ${med(fs.map((f) => f.dur)).toFixed(1)} s; damage taken per kill median ${med(fs.map((f) => f.taken)).toFixed(0)}; struck first ${(100 * fs.filter((f) => f.first).length / fs.length).toFixed(0)}%; HP at start median ${med(fs.map((f) => f.hp)).toFixed(2)}`)
+  }
+}
+if (PREDICT_STATS) console.log("ARENA hunters - full-lead hit chance: " + Object.entries(predictCounts).map(([hz, [h, n]]) => `${(Number(hz) / 10).toFixed(1)}s~${Number(hz) * 25}m: ${((100 * h) / n).toFixed(0)}%`).join("  "))
 const armed = results.filter((r) => r.armedAt !== null)
 console.log(`armed (laser or mortar) in ${armed.length}/${results.length} runs, median at ${armed.length ? armed.map((r) => r.armedAt!).sort((a, b) => a - b)[Math.floor(armed.length / 2)].toFixed(0) : "-"} s; holding at death: ${JSON.stringify(results.reduce((c: Record<string, number>, r) => ((c[r.armedWith || "none"] = (c[r.armedWith || "none"] ?? 0) + 1), c), {}))}`)
 if (FULL) {

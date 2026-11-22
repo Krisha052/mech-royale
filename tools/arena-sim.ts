@@ -41,6 +41,7 @@ const CUBES_A = Number(opt("cubes", "0")) // our starting power cubes: +4% max H
 const DROPS = !argv.includes("--no-drops") // supply drops: stand in the ring alone for capture_s -> cubes + full repair
 const HUNTER_JUMP = Number(opt("hunter-jump", "0")) // chance per decision that a strafing hunter hops (jump + short jet)
 const HUNTER_CUBES = Number(opt("hunter-cubes", "0")) // hunters carry ~t/this cubes (+0-2) when they arrive, up to 10 (0 = none)
+const SOUNDS = !argv.includes("--no-sounds") // hunters' gunfire, laser charging and footsteps, as obs.sounds (protocol §8)
 const SHOW_BULLETS = !argv.includes("--no-bullets") // visible enemy gun bullets in obs.projectiles, as the real server sends
 const FARM = !argv.includes("--no-farm") // drones, crates, power cubes and upgrade offers
 const PICKUPS = !argv.includes("--no-pickups") // floor weapons and hunter death drops (protocol §7 Weapon loot)
@@ -600,6 +601,8 @@ async function run(runSeed: number): Promise<Result> {
   let tick = 0
   let slowest = 0
   const modeLog: string[] = []
+  const soundLog: { kind: string; pos: number[]; t: number }[] = []
+  const stepAt = new Map<number, number>()
   let zone: ZoneObsT = { center: [ax, ay], radius: 2000, next_center: [ax, ay], next_radius: 1500, shrink_start: 9999, shrink_end: 9999, dps: 0 }
   let place = 0
   const endT = FULL ? cfg.match.duration_s : TIME
@@ -694,7 +697,12 @@ async function run(runSeed: number): Promise<Result> {
           const inView = d <= cfg.vision.near_range || (d <= cfg.vision.range && Math.abs(wrap(Math.atan2(p.pos[1] - A.pos[1], p.pos[0] - A.pos[0]) - A.aim[0])) <= (cfg.vision.fov_deg * Math.PI) / 360)
           return inView && world.clear(A.eye(), [p.pos[0], p.pos[1], p.pos[2] + 1], 2)
         }).map((p) => ({ id: p.id, kind: p.kind, pos: [...p.pos] })),
-        sounds: [], beams: [], events: A.events, offer, zone,
+        sounds: SOUNDS ? soundLog.filter((x) => x.t > t - 0.1 - 1e-9 && hyp2(x.pos, A.pos) <= (cfg.sound.range[x.kind] ?? 100)).map((x) => {
+          const d = hyp2(x.pos, A.pos)
+          const noise = ((cfg.sound.bearing_noise_deg * Math.PI) / 180) * (A.upgrades.includes("sensors") ? 0.5 : 1)
+          return { kind: x.kind, bearing: wrap(Math.atan2(x.pos[1] - A.pos[1], x.pos[0] - A.pos[0]) + gauss() * noise), dist: d < cfg.sound.near ? "near" : d < cfg.sound.mid ? "mid" : "far", age: +(t - x.t).toFixed(2) }
+        }) : [],
+        beams: [], events: A.events, offer, zone,
         drops: drops.filter((d) => !d.taken).map((d) => ({ id: d.id, pos: [...d.pos], radius: cfg.drops.radius, lands_in: Math.max(0, d.landT - t), capture_s: cfg.drops.capture_s, progress: d.progress, holder: d.holder })),
       })
       A.events = []
@@ -741,6 +749,14 @@ async function run(runSeed: number): Promise<Result> {
           if (VERBOSE) console.log(`  t=${t.toFixed(1)} took ${p.kind}`)
         }
       }
+      if (SOUNDS)
+        for (const h of hunters) {
+          if (h.hp <= 0 || !h.grounded || Math.hypot(h.vel[0], h.vel[1]) <= cfg.sound.step_speed) continue
+          if (t - (stepAt.get(h.id) ?? -9) >= cfg.sound.step_every) {
+            stepAt.set(h.id, t)
+            soundLog.push({ kind: h.boost ? "boost" : "step", pos: [...h.pos], t })
+          }
+        }
       for (const h of hunters) if (h.hp > 0) (FULL && !h.hunting ? roamThink(h, A, t, zone) : hunterThink(h, A, t))
       // drones (protocol §7): shoot whoever attacks them, or mechs within aggro range while near home;
       // chase until the target is 90 m away or the drone is 60 m from home
@@ -787,6 +803,7 @@ async function run(runSeed: number): Promise<Result> {
         m.ammo--
         m.shots++
         m.shotsBy.gun = (m.shotsBy.gun ?? 0) + 1
+        if (SOUNDS && m !== A && m.kind === "mech") soundLog.push({ kind: "gun", pos: [...m.pos], t })
         if (m.ammo === 0) m.reload = W.gun.reload
       }
       // second weapons (ours: laser / mortar / lightning; hunters: mortar)
@@ -798,7 +815,10 @@ async function run(runSeed: number): Promise<Result> {
           m.charge = Math.min(W.laser.charge * m.chargeMul, m.charge + dt)
           if (m.charge >= W.laser.charge * m.chargeMul) m.heldFull += dt
           if ((!m.fire2 && m.charge >= W.laser.min_charge) || m.heldFull >= W.laser.hold_s) shoot = true
-        } else if (m.fire2 && m.cool2 <= 0) m.charge = dt
+        } else if (m.fire2 && m.cool2 <= 0) {
+          m.charge = dt
+          if (SOUNDS && m !== A) soundLog.push({ kind: "laser_charge", pos: [...m.pos], t })
+        }
         if (shoot) {
           const frac = W.laser.min_frac + (1 - W.laser.min_frac) * Math.min(1, m.charge / (W.laser.charge * m.chargeMul))
           const d = [Math.cos(m.aim[1]) * Math.cos(m.aim[0]), Math.cos(m.aim[1]) * Math.sin(m.aim[0]), Math.sin(m.aim[1])]

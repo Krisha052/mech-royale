@@ -120,6 +120,11 @@ const K = {
   // hunters 60-200 m away.
   backWall: knob("BACK_WALL", 0), // weight of rear cover (0 = off)
   backWallEvery: knob("BACK_WALL_EVERY", 5), // decisions between spot choices
+  // Hearing (protocol §8): sounds give a bearing to unseen mechs. Idle: look toward the latest unexplained
+  // sound. Fighting: glance toward unexplained gunfire / laser charging from behind, before it hits us.
+  hear: knob("HEAR", 1),
+  hearGlanceS: knob("HEAR_GLANCE_S", 0.6),
+  hearRearDeg: knob("HEAR_REAR_DEG", 361), // only glance at sounds this far from where we are aiming
   dodge: knob("DODGE", 1), // move away from where an incoming mortar shell will land (arena: 0.93 -> 1.23 vs mortar hunters)
   dodgeMargin: knob("DODGE_MARGIN", 2), // extra metres beyond splash + our radius
   recoverHp: knob("RECOVER_HP", 0), // between fights: below this HP fraction, stay out of sight to regen (0 = off)
@@ -159,6 +164,8 @@ run((hello: Hello) => {
   let scanYaw = 0
   let recovering = false
   let unseenHit: { bearing: number; until: number } | null = null
+  let lastGlance = -99
+  let heardBearing: { bearing: number; t: number } | null = null
   // where cubes are: ones we have seen (they never move) and the spots where our kills died
   const knownCubes = new Map<number, Vec3>()
   const lastSeenAt = new Map<number, Vec3>()
@@ -303,6 +310,23 @@ run((hello: Hello) => {
           if (K.flipOnHit && t > nextStrafeFlip - 1.5) {
             strafeSign = -strafeSign
             nextStrafeFlip = t + 0.6 + rand() * 1.2
+          }
+        }
+      }
+
+      // ---- hearing ----
+      if (K.hear > 0) {
+        const threatKinds = new Set(["gun", "laser_charge", "laser", "mortar", "lightning", "step", "boost", "jet"])
+        const visibleYaws = obs.mechs.filter((m) => m.kind === "mech").map((m) => yawTo(pos, m.pos))
+        for (const snd of obs.sounds ?? []) {
+          if (!threatKinds.has(snd.kind)) continue
+          if (visibleYaws.some((y) => Math.abs(wrap(y - snd.bearing)) < 0.3)) continue // a mech we already see
+          heardBearing = { bearing: snd.bearing, t: t - (snd.age ?? 0) }
+          const shooting = snd.kind === "gun" || snd.kind === "laser_charge" || snd.kind === "laser"
+          const behind = Math.abs(wrap(snd.bearing - me.aim[0])) > (K.hearRearDeg * Math.PI) / 180
+          if (shooting && behind && snd.dist !== "far" && t - lastGlance > 2) {
+            unseenHit = { bearing: snd.bearing, until: t + K.hearGlanceS }
+            lastGlance = t
           }
         }
       }
@@ -957,12 +981,18 @@ run((hello: Hello) => {
         // turn toward an unseen attacker: protects the rear and brings it into view
         aimYaw = lastThreat.bearing
       } else {
+        // heard something we cannot see: look there first
+        if (K.hear > 0 && heardBearing && t - heardBearing.t < 1.5) {
+          aimYaw = heardBearing.bearing
+          scanYaw = heardBearing.bearing
+        } else {
         // nothing to shoot: sweep the whole circle to spot weapons, cubes and enemies
         // (vision is a 120 deg wedge out to 200 m; proximity sensors only reach 45 m)
         // House bots take nearby weapons within 2-11 s of spawning (house replay), so look around
         // fast at the start: a full circle in about 2 s for the first 20 s, then every ~4 s.
         scanYaw = wrap(scanYaw + (t < 20 ? 0.35 : 0.16))
         aimYaw = scanYaw
+        }
       }
       // reload while nothing to shoot
       if (gun && !shootAt && (gun.ammo ?? 12) < (gun.stats.mag ?? 12) * 0.5 && (gun.reload ?? 0) <= 0) act.reload = true

@@ -125,6 +125,14 @@ const K = {
   hear: knob("HEAR", 0),
   hearGlanceS: knob("HEAR_GLANCE_S", 0.6),
   hearRearDeg: knob("HEAR_REAR_DEG", 100), // only glance at sounds this far from where we are aiming
+  // Laser peeking: start charging while the target is briefly out of sight (seen in the last few s),
+  // so the beam fires the moment it reappears. Arena: a hunter is shootable only ~24 s per life.
+  precharge: knob("PRECHARGE", 0),
+  prechargeWindow: knob("PRECHARGE_WINDOW", 2), // s since the target was last in line of sight
+  // Laser counter-play: a visible mech charging a laser at us (charging flag + its aim) will fire a
+  // hitscan beam in under a second; step behind cover until it fires or stops charging.
+  laserDodge: knob("LASER_DODGE", 0),
+  laserDodgeAim: knob("LASER_DODGE_AIM", 0.1), // rad: how closely its aim must point at us
   dodge: knob("DODGE", 1), // move away from where an incoming mortar shell will land (arena: 0.93 -> 1.23 vs mortar hunters)
   dodgeMargin: knob("DODGE_MARGIN", 2), // extra metres beyond splash + our radius
   recoverHp: knob("RECOVER_HP", 0), // between fights: below this HP fraction, stay out of sight to regen (0 = off)
@@ -165,6 +173,9 @@ run((hello: Hello) => {
   let recovering = false
   let unseenHit: { bearing: number; until: number } | null = null
   let lastGlance = -99
+  let laserHide: { from: number; spot: P2; until: number } | null = null
+  let lastClearT = -99
+  let fullSince: number | null = null
   let heardBearing: { bearing: number; t: number } | null = null
   // where cubes are: ones we have seen (they never move) and the spots where our kills died
   const knownCubes = new Map<number, Vec3>()
@@ -350,7 +361,9 @@ run((hello: Hello) => {
         const base = me.weapons.some((w) => w?.kind === "laser") ? LASER_UPGRADE_ORDER : UPGRADE_ORDER
         // mode 4: what top-4 finishers chose most in recorded public matches (22 matches)
         // mode 6: sensors second (+15 m all-round sensing: hunters like to sit at ~55 m, just outside 45 m)
-        const order = K.upgMode === 4 ? REAL_WINNER_ORDER
+        // mode 7: laser_charge first when holding a laser (the strongest team bot's favourite pick)
+        const order = K.upgMode === 7 ? (me.weapons.some((w) => w?.kind === "laser") ? ["laser_charge", ...base.filter((u) => u !== "laser_charge")] : base)
+          : K.upgMode === 4 ? REAL_WINNER_ORDER
           : K.upgMode === 6 ? [base[0], "sensors", ...base.slice(1).filter((u) => u !== "sensors")]
           : first ? [first, ...base.filter((u) => u !== first)] : base
         obs.offer.choices.forEach((c, i) => {
@@ -815,6 +828,43 @@ run((hello: Hello) => {
         }
       } else if (climbFor && !goingFor) climbFor = null
 
+      // ---- laser counter-play: hide from a beam that is about to be fired at us ----
+      if (K.laserDodge > 0 && !light) {
+        const myBody: Vec3 = [pos[0], pos[1], pos[2] + (me.stats.height ?? cfg.mech.height) / 2]
+        const shooter = obs.mechs.find((m) => m.kind === "mech" && m.charging && d2(m.pos, pos) < (cfg.weapons.laser.range ?? 280)
+          && Math.abs(wrap(m.aim[0] - yawTo(m.pos, pos))) < K.laserDodgeAim
+          && world.clear([m.pos[0], m.pos[1], m.pos[2] + cfg.mech.muzzle_height], myBody, 2))
+        if (shooter && (!laserHide || laserHide.from !== shooter.id)) {
+          const eyeS: Vec3 = [shooter.pos[0], shooter.pos[1], shooter.pos[2] + cfg.mech.muzzle_height]
+          let best: P2 | null = null
+          let bestD = Infinity
+          for (const r of [6, 10, 14]) {
+            for (let k = 0; k < 12; k++) {
+              const a = (k / 12) * TAU
+              const c: P2 = [pos[0] + Math.cos(a) * r, pos[1] + Math.sin(a) * r]
+              const [gi, gj] = world.navOf(c[0], c[1])
+              if (!world.walkable(gi, gj) || !world.walkLine([pos[0], pos[1]], c)) continue
+              const gz = world.groundAt(c[0], c[1])
+              if (world.clear(eyeS, [c[0], c[1], gz + 4.5], 2)) continue // still exposed
+              if (r < bestD) {
+                bestD = r
+                best = c
+              }
+            }
+            if (best) break
+          }
+          laserHide = best ? { from: shooter.id, spot: best, until: t + 1.5 } : null
+        }
+        const stillCharging = laserHide && obs.mechs.some((m) => m.id === laserHide!.from && m.charging)
+        if (laserHide && (t > laserHide.until || (!stillCharging && t > laserHide.until - 1.2))) laserHide = null
+        if (laserHide) {
+          const yaw = yawTo(pos, laserHide.spot)
+          act.move = d2(pos, laserHide.spot) > 1 ? [Math.cos(yaw), Math.sin(yaw)] : [0, 0]
+          act.boost = me.energy > 5
+          mode = "laser cover"
+        }
+      }
+
       // ---- dodge bullets: sidestep any visible bullet that would pass through us soon ----
       if (K.bulletDodge > 0) {
         const r = (me.stats.radius ?? cfg.mech.radius) + K.bulletMargin
@@ -962,12 +1012,17 @@ run((hello: Hello) => {
           if (second?.kind === "lightning" && clear && dist < (second.stats.range ?? 45) - 2 && Math.abs(wrap(me.aim[0] - aimYaw)) < 0.2 && me.energy > 10) fire[1] = true
           if (laser) {
             const inRange = dist < (laser.stats.range ?? 280) - 10
+            if (clear) lastClearT = t
             if (laserCharge > 0) {
               // keep holding until fully charged, the shot is clear and the torso is on target;
               // letting go fires the beam (a full charge also fires on its own after hold_s)
+              if (laserCharge >= laserFull * 0.97) fullSince ??= t
+              else fullSince = null
               const ready = laserCharge >= laserFull * 0.97 && clear && inRange && err < tol
-              fire[1] = !ready
-            } else if (laser.cooldown <= 0 && clear && inRange) {
+              const expiring = fullSince !== null && t - fullSince > (laser.stats.hold_s ?? cfg.weapons.laser.hold_s) - 0.25
+              fire[1] = !(ready || (K.precharge > 0 && expiring))
+            } else if (laser.cooldown <= 0 && inRange && (clear || (K.precharge > 0 && t - lastClearT < K.prechargeWindow))) {
+              fullSince = null
               fire[1] = true
             }
           }

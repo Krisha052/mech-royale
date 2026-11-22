@@ -415,7 +415,7 @@ function roamThink(h: Mech, A: Mech, t: number, z: ZoneObsT) {
 }
 
 // ---------- one run ----------
-type Result = { points: number; place: number; dropsCaptured: number; cubes: number; upgrades: string[]; dealtBy: Record<string, number>; shotsBy: Record<string, number>; takenBy: Record<string, number>; activeAtDeath: number; mortarAtDeath: number; hpAtFightStart: number[]; kills: number; time: number; taken: number; aHit: number; hHit: number; aShots: number; hShots: number; slowest: number; armedAt: number | null; armedWith: string }
+type Result = { laserStat?: { shootable: number; charging: number; readyIdle: number; cooling: number }; points: number; place: number; dropsCaptured: number; cubes: number; upgrades: string[]; dealtBy: Record<string, number>; shotsBy: Record<string, number>; takenBy: Record<string, number>; activeAtDeath: number; mortarAtDeath: number; hpAtFightStart: number[]; kills: number; time: number; taken: number; aHit: number; hHit: number; aShots: number; hShots: number; slowest: number; armedAt: number | null; armedWith: string }
 
 async function run(runSeed: number): Promise<Result> {
   seed = runSeed
@@ -601,6 +601,7 @@ async function run(runSeed: number): Promise<Result> {
   let tick = 0
   let slowest = 0
   const modeLog: string[] = []
+  const laserStat = { shootable: 0, charging: 0, readyIdle: 0, cooling: 0 }
   const soundLog: { kind: string; pos: number[]; t: number }[] = []
   const stepAt = new Map<number, number>()
   let zone: ZoneObsT = { center: [ax, ay], radius: 2000, next_center: [ax, ay], next_radius: 1500, shrink_start: 9999, shrink_end: 9999, dps: 0 }
@@ -721,6 +722,15 @@ async function run(runSeed: number): Promise<Result> {
       A.fire = !!act.fire?.[0]
       A.fire2 = !!act.fire?.[1]
       A.wantReload = !!act.reload
+      if (A.second === "laser") {
+        const canShoot = hunters.some((h) => h.hp > 0 && hyp2(h.pos, A.pos) < W.laser.range - 10 && world.clear(A.muzzle(), h.center(), 3))
+        if (canShoot) {
+          laserStat.shootable++
+          if (A.charge > 0 || A.fire2) laserStat.charging++
+          else if (A.cool2 > 0) laserStat.cooling++
+          else laserStat.readyIdle++
+        }
+      }
       if (offers[0] && (act.pick !== undefined || t > offers[0].expires)) {
         const o = offers.shift()!
         const i = act.pick !== undefined && o.choices[act.pick] ? act.pick : 0
@@ -1032,7 +1042,7 @@ async function run(runSeed: number): Promise<Result> {
     // alive at the end (time out, or last one standing): survivors are ranked by HP
     place = 1 + hunters.filter((h) => h.hp > 0 && h.hp > A.hp).length
   }
-  return { points: FULL ? 16 - place : kills, place, dropsCaptured, cubes: A.cubes, upgrades: A.upgrades, dealtBy: A.dealtBy, shotsBy: A.shotsBy, takenBy: A.takenBy, activeAtDeath: A.hp <= 0 ? activeH.length : -1, mortarAtDeath: activeH.filter((h) => h.second === "mortar").length, hpAtFightStart: [], kills, time: t, taken: A.taken, aHit: A.hits / Math.max(1, A.shots), hHit: hHits / Math.max(1, hShots), aShots: A.shots, hShots, slowest, armedAt, armedWith: A.second }
+  return { laserStat, points: FULL ? 16 - place : kills, place, dropsCaptured, cubes: A.cubes, upgrades: A.upgrades, dealtBy: A.dealtBy, shotsBy: A.shotsBy, takenBy: A.takenBy, activeAtDeath: A.hp <= 0 ? activeH.length : -1, mortarAtDeath: activeH.filter((h) => h.second === "mortar").length, hpAtFightStart: [], kills, time: t, taken: A.taken, aHit: A.hits / Math.max(1, A.shots), hHit: hHits / Math.max(1, hShots), aShots: A.shots, hShots, slowest, armedAt, armedWith: A.second }
 }
 
 const results: Result[] = []
@@ -1057,6 +1067,11 @@ for (const r of deaths) act[r.activeAtDeath] = (act[r.activeAtDeath] ?? 0) + 1
 console.log(`damage taken per run by weapon: ${JSON.stringify(Object.fromEntries(Object.entries(tb).map(([k, v]) => [k, Math.round(v)])))}; hunters alive when we died: ${JSON.stringify(act)}`)
 console.log(`supply drops captured per run: ${(results.reduce((a, r) => a + r.dropsCaptured, 0) / results.length).toFixed(2)}; alive at 95 s (first drop lands): ${results.filter((r) => r.time > 95).length}/${results.length}`)
 console.log(`cubes at death: mean ${(results.reduce((a, r) => a + r.cubes, 0) / results.length).toFixed(1)}; upgrades per run ${(results.reduce((a, r) => a + r.upgrades.length, 0) / results.length).toFixed(1)}`)
+{
+  const ls = { shootable: 0, charging: 0, readyIdle: 0, cooling: 0 }
+  for (const r of results) if (r.laserStat) for (const k of Object.keys(ls) as (keyof typeof ls)[]) ls[k] += r.laserStat[k]
+  if (ls.shootable) console.log(`laser while a hunter is shootable: charging ${(100 * ls.charging / ls.shootable).toFixed(0)}%, cooling down ${(100 * ls.cooling / ls.shootable).toFixed(0)}%, READY BUT IDLE ${(100 * ls.readyIdle / ls.shootable).toFixed(0)}%  (${(ls.shootable / 10 / results.length).toFixed(0)} s shootable per run)`)
+}
 const armed = results.filter((r) => r.armedAt !== null)
 console.log(`armed (laser or mortar) in ${armed.length}/${results.length} runs, median at ${armed.length ? armed.map((r) => r.armedAt!).sort((a, b) => a - b)[Math.floor(armed.length / 2)].toFixed(0) : "-"} s; holding at death: ${JSON.stringify(results.reduce((c: Record<string, number>, r) => ((c[r.armedWith || "none"] = (c[r.armedWith || "none"] ?? 0) + 1), c), {}))}`)
 if (FULL) {

@@ -71,6 +71,10 @@ const K = {
   grabInFight: knob("GRAB_IN_FIGHT", 80), // unarmed in a fight: move to a known laser/mortar within this many m (0 = off). Arena: armed 63% -> 92% of runs, kills 2.21 -> 2.60
   explore: knob("EXPLORE", 1), // unarmed and no weapon known: walk to unexplored ground to find one
   exploreUntil: knob("EXPLORE_UNTIL", 240), // stop exploring after this match time, s
+  hunt: knob("HUNT", 1), // no fight going on: go after the latest sign of an enemy (seen, heard) or unexplored ground, before farming
+  huntHp: knob("HUNT_HP", 0.7), // ... only above this HP fraction
+  huntSeenS: knob("HUNT_SEEN_S", 20), // ... chase where an enemy was seen up to this long ago
+  huntHeardS: knob("HUNT_HEARD_S", 10), // ... or a sound heard up to this long ago
   faceS: knob("FACE_S", 0), // after an enemy leaves our 5 s memory, keep the torso toward where it was for this long
   arcW: knob("ARC_W", 0), // target ranking: + this many metres per other enemy that would be behind us while we aim at it
   targetHpW: knob("TARGET_HP_W", 0.05), // target ranking = distance + hp * this (higher: finish wounded ones first)
@@ -202,6 +206,7 @@ run((hello: Hello) => {
   const knownCubes = new Map<number, Vec3>()
   const lastSeenAt = new Map<number, Vec3>()
   const lastSeenT = new Map<number, number>()
+  let heardSpot: { pos: P2; t: number } | null = null
   let lootSpots: { pos: Vec3; until: number }[] = []
   let lastNpcHit: { id: number; t: number } | null = null
   let lastHunterSeen = -999
@@ -350,6 +355,16 @@ run((hello: Hello) => {
         }
       }
 
+      // ---- hearing (for hunting): rough positions of mech sounds we cannot see the source of ----
+      if (K.hunt > 0) {
+        const mechKinds = new Set(["gun", "laser_charge", "laser", "mortar", "lightning", "step", "boost", "jet"])
+        const visYaws = obs.mechs.filter((m) => m.kind === "mech").map((m) => yawTo(pos, m.pos))
+        for (const snd of obs.sounds ?? []) {
+          if (!mechKinds.has(snd.kind) || visYaws.some((y) => Math.abs(wrap(y - snd.bearing)) < 0.3)) continue
+          const r = snd.dist === "near" ? 40 : snd.dist === "mid" ? 110 : 200
+          heardSpot = { pos: [pos[0] + Math.cos(snd.bearing) * r, pos[1] + Math.sin(snd.bearing) * r], t: t - (snd.age ?? 0) }
+        }
+      }
       // ---- hearing ----
       if (K.hear > 0) {
         const threatKinds = new Set(["gun", "laser_charge", "laser", "mortar", "lightning", "step", "boost", "jet"])
@@ -860,6 +875,21 @@ run((hello: Hello) => {
             act.take = pick.id
             if (!want2) act.drop = 1
           }
+        } else if (K.hunt > 0 && hpFrac >= K.huntHp && (() => {
+          // the freshest sign of an enemy: where one was last seen, else a sound, else unexplored ground
+          let dest: P2 | null = null
+          let freshest = -Infinity
+          for (const [id, st] of lastSeenT) {
+            if (t - st > K.huntSeenS || st <= freshest) continue
+            const p = lastSeenAt.get(id)
+            if (p && insideSafe(p) && d2(p, pos) > 15) { dest = [p[0], p[1]]; freshest = st }
+          }
+          if (!dest && heardSpot && t - heardSpot.t < K.huntHeardS && insideSafe(heardSpot.pos) && d2(heardSpot.pos, pos) > 15) dest = heardSpot.pos
+          if (!dest) dest = exploreTarget(insideSafe)
+          if (dest) { goal = dest; mode = "hunt" }
+          return dest !== null
+        })()) {
+          // goal set above
         } else if (K.explore > 0 && !armed && t < K.exploreUntil && !farmTarget(inReach) && exploreTarget(insideSafe)) {
           goal = exploreTarget(insideSafe)!
           mode = "explore"

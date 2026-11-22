@@ -122,9 +122,9 @@ const K = {
   backWallEvery: knob("BACK_WALL_EVERY", 5), // decisions between spot choices
   // Hearing (protocol §8): sounds give a bearing to unseen mechs. Idle: look toward the latest unexplained
   // sound. Fighting: glance toward unexplained gunfire / laser charging from behind, before it hits us.
-  hear: knob("HEAR", 1),
+  hear: knob("HEAR", 0),
   hearGlanceS: knob("HEAR_GLANCE_S", 0.6),
-  hearRearDeg: knob("HEAR_REAR_DEG", 361), // only glance at sounds this far from where we are aiming
+  hearRearDeg: knob("HEAR_REAR_DEG", 100), // only glance at sounds this far from where we are aiming
   dodge: knob("DODGE", 1), // move away from where an incoming mortar shell will land (arena: 0.93 -> 1.23 vs mortar hunters)
   dodgeMargin: knob("DODGE_MARGIN", 2), // extra metres beyond splash + our radius
   recoverHp: knob("RECOVER_HP", 0), // between fights: below this HP fraction, stay out of sight to regen (0 = off)

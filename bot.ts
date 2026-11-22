@@ -71,6 +71,10 @@ const K = {
   grabInFight: knob("GRAB_IN_FIGHT", 80), // unarmed in a fight: move to a known laser/mortar within this many m (0 = off). Arena: armed 63% -> 92% of runs, kills 2.21 -> 2.60
   explore: knob("EXPLORE", 1), // unarmed and no weapon known: walk to unexplored ground to find one
   exploreUntil: knob("EXPLORE_UNTIL", 240), // stop exploring after this match time, s
+  turtleT: knob("TURTLE_T", 100), // before this match time: avoid fights and let the house bots thin each other out (placement scoring)
+  turtleR: knob("TURTLE_R", 180), // ... back away from any enemy closer than this
+  turtleCorner: knob("TURTLE_CORNER", 35), // ... unless one is this close (then fight)
+  turtleFireR: knob("TURTLE_FIRE_R", 50), // ... and hold fire unless hit in the last 3 s or an enemy is this close
   faceS: knob("FACE_S", 0), // after an enemy leaves our 5 s memory, keep the torso toward where it was for this long
   arcW: knob("ARC_W", 0), // target ranking: + this many metres per other enemy that would be behind us while we aim at it
   targetHpW: knob("TARGET_HP_W", 0.05), // target ranking = distance + hp * this (higher: finish wounded ones first)
@@ -519,6 +523,8 @@ run((hello: Hello) => {
       const slack = zoneSlack(obs, anchor)
       const urgent = d2(pos, anchor) > 1 && (outside || slack < 12)
       const threatened = mechs.length > 0 || (lastThreat !== null && t - lastThreat.t < 4)
+      const turtling = t < K.turtleT
+      const turtleFlee = turtling && mechs.some((m) => d2(m.pos, pos) < K.turtleR) && !mechs.some((m) => d2(m.pos, pos) < K.turtleCorner)
       // Retreat only when it pays: low and the fight is not going our way, or badly outnumbered.
       // Backing away from a single attacker mostly hands it free shots.
       const targetFrac = target && target.hp !== undefined && target.max_hp ? target.hp / target.max_hp : 1
@@ -553,7 +559,7 @@ run((hello: Hello) => {
         const ttdS = me.hp / Math.max(1, inDps * armor)
         losingTrade = ttkS > ttdS * K.ttkMargin
       }
-      const retreat = (threatened || recover) && (K.pacifist > 0 || recover || (K.ttk > 0 ? losingTrade : (hpFrac < K.retreatHp && targetFrac >= hpFrac) || near.length >= K.retreatN))
+      const retreat = turtleFlee || (threatened || recover) && (K.pacifist > 0 || recover || (K.ttk > 0 ? losingTrade : (hpFrac < K.retreatHp && targetFrac >= hpFrac) || near.length >= K.retreatN))
       const safeR = obs.zone.next_radius * 0.6
       const insideSafe = (p: number[]) => d2(p, obs.zone.next_center) <= Math.max(safeR, 15)
 
@@ -863,7 +869,7 @@ run((hello: Hello) => {
         } else if (K.explore > 0 && !armed && t < K.exploreUntil && !farmTarget(inReach) && exploreTarget(insideSafe)) {
           goal = exploreTarget(insideSafe)!
           mode = "explore"
-        } else if (K.farm > 0 && t < K.farmUntil && hpFrac > K.farmMinHp && farmTarget(inReach)) {
+        } else if (!turtling && K.farm > 0 && t < K.farmUntil && hpFrac > K.farmMinHp && farmTarget(inReach)) {
           const f = farmTarget(inReach)!
           // stand off: drones from beyond their aggro range, crates from close enough to hit
           const stand = f.npc ? K.npcStandoff : 30
@@ -900,6 +906,9 @@ run((hello: Hello) => {
         const rushLaser = goingFor?.kind === "laser" && goingFor.pos[2] <= world.groundAt(goingFor.pos[0], goingFor.pos[1]) + 3 && d2(pos, goal) > 8
         act.boost = (me.energy > 30 && (mode === "zone!" || mode === "retreat" || (mode === "to zone" && d2(pos, goal) > 60) || (K.boostFight > 0 && mode === "fight" && me.energy > K.boostFight) || (mode === "kite" && me.energy > K.kiteBoost) || (mode === "split pack" && me.energy > K.boostFight) || (mode === "min risk" && me.energy > K.boostFight) || (mode === "drop rush" && me.energy > 30))) || (rushLaser && me.energy > 15)
       }
+
+      // turtling with nobody around: no boosting (90 m sound) except to the zone or for a weapon
+      if (turtling && !urgent && mode !== "retreat" && !mode.startsWith("get") && !mode.startsWith("drop") && mechs.length === 0) act.boost = false
 
       // ---- climbing to a roof weapon (protocol.md §7: jump, jet until the feet clear the edge) ----
       if (goingFor && goingFor.pos[2] > world.groundAt(goingFor.pos[0], goingFor.pos[1]) + 3) {
@@ -1067,9 +1076,9 @@ run((hello: Hello) => {
       let aimPitch = 0
       const fire: [boolean, boolean] = [false, false]
 
-      const farming = K.farm > 0 && t < K.farmUntil && hpFrac > K.farmMinHp
-      const crateRange = farming ? 100 : K.shootCrate > 0 ? 60 : 0
-      const npcRange = farming ? 130 : K.shootNpc > 0 && hpFrac > 0.6 && t < 330 ? 70 : 0
+      const farming = !turtling && K.farm > 0 && t < K.farmUntil && hpFrac > K.farmMinHp
+      const crateRange = turtling ? 0 : farming ? 100 : K.shootCrate > 0 ? 60 : 0
+      const npcRange = turtling ? 0 : farming ? 130 : K.shootNpc > 0 && hpFrac > 0.6 && t < 330 ? 70 : 0
       const crate = !target ? obs.crates.filter((c) => d2(c.pos, pos) < crateRange && world.clear(muzzle, [c.pos[0], c.pos[1], c.pos[2] + 1.2], 1.5)).sort((a, b) => d2(a.pos, pos) - d2(b.pos, pos))[0] : undefined
       // a drone that is shooting us gets shot back at any HP (otherwise it keeps chipping at us)
       const attackingNpc = K.npcFix > 0 && lastNpcHit && t - lastNpcHit.t < 3 ? npcs.find((n) => n.id === lastNpcHit!.id && shootable(n)) : undefined
@@ -1195,6 +1204,8 @@ run((hello: Hello) => {
       }
       act.aim = [wrap(aimYaw), Math.max(cfg.mech.min_pitch, Math.min(cfg.mech.max_pitch, aimPitch))]
       act.fire = K.pacifist > 0 ? [false, false] : fire
+      // turtling: gunfire carries 320 m; shoot only when already found (hit recently) or an enemy is close
+      if (turtling && !(lastThreat !== null && t - lastThreat.t < 3) && !mechs.some((m) => d2(m.pos, pos) < K.turtleFireR)) act.fire = [false, false]
 
       // ---- debug ----
       draw.label(`${mode}${light ? " L" : ""} hp${Math.round(hpFrac * 100)} s${Math.round(slack)} ${target ? `T${target.id}${targetClear ? "" : "?"}` : ""}`)

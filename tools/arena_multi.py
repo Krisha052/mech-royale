@@ -13,7 +13,7 @@ def parse(spec):
 def one(job):
     name, envs, extra, seed = job
     out = subprocess.run(["bun", "tools/arena-sim.ts", "--runs", runs, "--seed", str(seed), "--env", envs] + extra, capture_output=True, text=True).stdout
-    m = re.search(r"kills mean ([0-9.]+)", out)
+    m = re.search(r"points mean ([0-9.]+)", out) if os.environ.get("METRIC") == "points" else re.search(r"kills mean ([0-9.]+)", out)
     return name, seed, float(m.group(1)) if m else float("nan")
 jobs = [(*parse(s), sd) for s in specs for sd in SEEDS]
 res = {}

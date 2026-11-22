@@ -36,6 +36,9 @@ const DEATHLOG = argv.includes("--deathlog")
 // hunting (one early, one more per kill, all of them after --late s), placement points as score.
 const FULL = argv.includes("--full")
 const LATE_T = Number(opt("late", "300"))
+// --bg-deaths FILE: JSON list of death-time lists from recorded house-bot matches. In --full mode, house
+// bots also die off-screen on that schedule (they kill each other); our kills count toward it.
+const BG_DEATHS: number[][] = opt("bg-deaths", "") ? JSON.parse(require("fs").readFileSync(opt("bg-deaths", ""), "utf8")) : []
 const RETALIATE = Number(opt("retaliate", "1")) // 1: non-hunting house bots fight back when we attack them; 0: only hunters fight // print what our bot was doing in its last seconds
 const CUBES_A = Number(opt("cubes", "0")) // our starting power cubes: +4% max HP and damage each (up to 10)
 const DROPS = !argv.includes("--no-drops") // supply drops: stand in the ring alone for capture_s -> cubes + full repair
@@ -673,7 +676,23 @@ async function run(runSeed: number): Promise<Result> {
     sent = TYPES.length
   }
 
+  let bgSched: number[] = []
+  if (FULL && BG_DEATHS.length) {
+    const pickL = BG_DEATHS[Math.floor(rand() * BG_DEATHS.length)].slice()
+    pickL.splice(Math.floor(rand() * pickL.length), 1) // we take the place of one recorded mech
+    bgSched = pickL
+  }
   while (t < endT && A.hp > 0 && (!FULL || hunters.some((h) => h.hp > 0))) {
+    if (FULL && bgSched.length) {
+      const due = bgSched.filter((d) => d <= t).length
+      const dead = hunters.filter((h) => h.hp <= 0).length
+      if (dead < due) {
+        const pool = hunters.filter((h) => h.hp > 0 && !h.hunting)
+        const pool2 = pool.length ? pool : hunters.filter((h) => h.hp > 0)
+        const v = pool2[Math.floor(rand() * pool2.length)]
+        if (v) { v.hp = 0; (v as any).counted = true; (v as any).bg = true }
+      }
+    }
     if (FULL) {
       zone = zoneAt!(t)
       // squad: one early, one more per kill, weakest first; all of them late

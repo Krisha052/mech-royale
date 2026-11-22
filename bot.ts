@@ -72,7 +72,7 @@ const K = {
   explore: knob("EXPLORE", 1), // unarmed and no weapon known: walk to unexplored ground to find one
   exploreUntil: knob("EXPLORE_UNTIL", 240), // stop exploring after this match time, s
   targetHpW: knob("TARGET_HP_W", 0.05), // target ranking = distance + hp * this (higher: finish wounded ones first)
-  upgMode: knob("UPG_MODE", 0), // 0: laser damage first when holding a laser; 1 plating first; 2 armor first; 3 nanites first
+  upgMode: knob("UPG_MODE", 4), // 0: laser damage first when holding a laser; 1 plating first; 2 armor first; 3 nanites first
   // Kite with a laser: hold a long distance (their accuracy falls with range, our led shots do
   // not) and back off firmly, boosting, when they close in. Vision ends at 200 m (+25 with sensors).
   kite: knob("KITE", 0),

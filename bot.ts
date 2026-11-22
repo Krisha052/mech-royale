@@ -96,14 +96,14 @@ const K = {
   threatCharging: knob("THREAT_CHARGING", 150),
   threatMortar: knob("THREAT_MORTAR", 30),
   // Split the pack: with 2+ enemies around, also move away from their centre while fighting.
-  pack: knob("PACK", 1), // weight of the away-from-centre pull (0 = off)
+  pack: knob("PACK", 0), // weight of the away-from-centre pull (0 = off)
   packRange: knob("PACK_RANGE", 250), // enemies within this count toward the centre
   npcFix: knob("NPC_FIX", 0), // shoot drones that are hurting us at any HP; no drone farming with hunters about
   roofSafe: knob("ROOF_SAFE", 0), // no roof climbing while under fire or below 60% HP
   // Supply drops: full heal + 3 cubes after standing in the ring alone for capture_s. Go for one
   // even during a fight (we keep shooting on the way), if it lands soon and is not too far.
-  dropRush: knob("DROP_RUSH", 0),
-  dropRange: knob("DROP_RANGE", 250), // m
+  dropRush: knob("DROP_RUSH", 1),
+  dropRange: knob("DROP_RANGE", 400), // m
   dropLead: knob("DROP_LEAD", 10), // start moving this many seconds before it lands
   dropMaxHp: knob("DROP_MAX_HP", 1.01), // only if our HP fraction is below this
   // Collect cubes during fights (killed mechs drop all their cubes + 2; each cube heals ~56 HP and adds

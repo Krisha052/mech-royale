@@ -61,9 +61,9 @@ const K = {
   // Farming power cubes (+4% max HP and damage each, up to 10; upgrade offers at 1, 3, 6, 10).
   // Arena sim with a cube head start: 0 cubes 2.85 kills, 6 cubes 3.55, 10 cubes 4.95.
   farm: knob("FARM", 1), // in free time, go and shoot drones and ground crates for cubes (arena: 2.17 -> 2.73 kills, cubes at death 3.0 -> 6.1)
-  farmUntil: knob("FARM_UNTIL", 480), // match time after which we stop farming, s
-  farmRange: knob("FARM_RANGE", 350), // how far we walk for a drone or crate, m
-  farmMinHp: knob("FARM_MIN_HP", 0.5), // arena (4 seeds x 30): 0.85 -> 2.72 kills vs 0.70 -> 2.52 // do not farm below this HP fraction
+  farmUntil: knob("FARM_UNTIL", 420), // match time after which we stop farming, s
+  farmRange: knob("FARM_RANGE", 250), // how far we walk for a drone or crate, m
+  farmMinHp: knob("FARM_MIN_HP", 0.6), // arena (4 seeds x 30): 0.85 -> 2.72 kills vs 0.70 -> 2.52 // do not farm below this HP fraction
   npcStandoff: knob("NPC_STANDOFF", 70), // shoot drones from here (their aggro range is 45 m)
   cubeRange: knob("CUBE_RANGE", 200), // walk this far for a visible cube
   shootNpc: knob("SHOOT_NPC", 1), // shoot drones we happen to pass (when not farming)
@@ -72,7 +72,7 @@ const K = {
   explore: knob("EXPLORE", 1), // unarmed and no weapon known: walk to unexplored ground to find one
   exploreUntil: knob("EXPLORE_UNTIL", 240), // stop exploring after this match time, s
   targetHpW: knob("TARGET_HP_W", 0.05), // target ranking = distance + hp * this (higher: finish wounded ones first)
-  upgMode: knob("UPG_MODE", 0), // 0: laser damage first when holding a laser; 1 plating first; 2 armor first; 3 nanites first
+  upgMode: knob("UPG_MODE", 7), // 0: laser damage first when holding a laser; 1 plating first; 2 armor first; 3 nanites first
   // Kite with a laser: hold a long distance (their accuracy falls with range, our led shots do
   // not) and back off firmly, boosting, when they close in. Vision ends at 200 m (+25 with sensors).
   kite: knob("KITE", 0),
@@ -108,7 +108,7 @@ const K = {
   dropMaxHp: knob("DROP_MAX_HP", 1.01), // only if our HP fraction is below this
   // Collect cubes during fights (killed mechs drop all their cubes + 2; each cube heals ~56 HP and adds
   // 4% damage). Public matches: the winner picks up kill cubes within seconds, mid-fight.
-  cubeFight: knob("CUBE_FIGHT", 300), // real: 3.67 -> 4.10 with 120 m
+  cubeFight: knob("CUBE_FIGHT", 200), // real: 3.67 -> 4.10 with 120 m
   cubeMemory: knob("CUBE_MEMORY", 1), // remember cubes we have seen and where our kills died (their cubes drop there) // walk over visible cubes within this many m while fighting (0 = off)
   timing: knob("TIMING", 1), // timing safeguard (do less work when slow); simulations turn it off so CPU load does not change behaviour
   // Hit from behind by someone we cannot see: turn to face the shot for a moment so the attacker comes

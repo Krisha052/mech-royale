@@ -75,7 +75,7 @@ const K = {
   perchMinH: knob("PERCH_MIN_H", 12), // roof height above the ground, m
   perchMaxH: knob("PERCH_MAX_H", 40),
   perchEdge: knob("PERCH_EDGE", 7), // stand at least this far from every roof edge
-  perchFrom: knob("PERCH_FROM", 0), // match time to start, s
+  perchFrom: knob("PERCH_FROM", 180), // match time to start, s
   faceS: knob("FACE_S", 0), // after an enemy leaves our 5 s memory, keep the torso toward where it was for this long
   arcW: knob("ARC_W", 0), // target ranking: + this many metres per other enemy that would be behind us while we aim at it
   targetHpW: knob("TARGET_HP_W", 0.05), // target ranking = distance + hp * this (higher: finish wounded ones first)

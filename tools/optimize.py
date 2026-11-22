@@ -14,7 +14,8 @@ Everything is logged as JSON lines; `--report` prints the best confirmed setting
 import argparse, json, math, os, random, re, subprocess, sys, time
 from concurrent.futures import ThreadPoolExecutor
 
-REALISTIC = ["--hunter-jump", "0.08", "--hunter-mix", "mortar:0.35,laser:0.3,lightning:0.07"]
+# hunters calibrated to real house bots: weapon mix, hopping, cubes, and movement as unpredictable as recorded house bots
+REALISTIC = ["--hunter-jump", "0.08", "--hunter-mix", "mortar:0.35,laser:0.3,lightning:0.07", "--hunter-cubes", "30", "--hunter-flip", "0.5,0.8", "--hunter-jink", "0.5"]
 
 # name: (low, high, kind) ; kind "f" float, "i" integer, "b" on/off
 SPACE = {
@@ -26,6 +27,9 @@ SPACE = {
     "BULLET_MARGIN": (0, 2, "f"), "BULLET_HORIZON": (0.4, 1.6, "f"), "DODGE_MARGIN": (0, 5, "f"),
     "TARGET_HP_W": (0, 0.3, "f"), "PACK": (0, 2, "f"),
     "THREAT": (0, 1, "b"), "NPC_FIX": (0, 1, "b"), "ROOF_SAFE": (0, 1, "b"),
+    "CUBE_FIGHT": (60, 320, "f"), "CUBE_MEMORY": (0, 1, "b"), "DROP_RUSH": (0, 1, "b"), "DROP_RANGE": (150, 700, "f"),
+    "DROP_LEAD": (3, 25, "f"), "REAR_TURN": (0, 1, "b"), "REAR_TURN_S": (0.3, 2.0, "f"), "MAX_CLIMB": (0, 50, "f"),
+    "MIN_RISK": (0, 1, "b"), "CUBE_MAX": (10, 40, "f"),
 }
 NAMES = list(SPACE)
 
@@ -56,7 +60,7 @@ def from_unit(u):
 
 
 def run_one(dirpath, cfg, seed, runs):
-    env = ",".join(f"BOT_{k}={v}" for k, v in cfg.items())
+    env = ",".join(["BOT_TIMING=0"] + [f"BOT_{k}={v}" for k, v in cfg.items()])
     out = subprocess.run(["bun", "tools/arena-sim.ts", "--runs", str(runs), "--seed", str(seed), "--env", env] + REALISTIC,
                          cwd=dirpath, capture_output=True, text=True, timeout=3600).stdout
     m = re.search(r"kills mean ([0-9.]+)", out)
@@ -115,7 +119,7 @@ def main():
     deadline = time.time() + a.hours * 3600
     best_search = -1.0
     with ThreadPoolExecutor(a.workers) as pool:
-        b = evaluate(pool, a.dir, [base], held_out, 20)[0]
+        b = evaluate(pool, a.dir, [base], held_out, 30)[0]
         log(a.log, {"type": "baseline", "score": b, "cfg": base})
         gen = 0
         while time.time() < deadline:
@@ -136,12 +140,12 @@ def main():
             # confirm a candidate on held-out seeds when it looks better than anything so far
             if scores[top] > best_search and gen > 1:
                 best_search = scores[top]
-                c = evaluate(pool, a.dir, [cfgs[top]], held_out, 20)[0]
+                c = evaluate(pool, a.dir, [cfgs[top]], held_out, 30)[0]
                 log(a.log, {"type": "confirm", "gen": gen, "score": c, "search_score": scores[top], "cfg": cfgs[top]})
             # every 5 generations also confirm the current mean (the search's consensus)
             if gen % 5 == 0:
                 mc = from_unit(mean)
-                c = evaluate(pool, a.dir, [mc], held_out, 20)[0]
+                c = evaluate(pool, a.dir, [mc], held_out, 30)[0]
                 log(a.log, {"type": "confirm", "gen": gen, "score": c, "search_score": scores[0], "cfg": mc, "what": "mean"})
 
 

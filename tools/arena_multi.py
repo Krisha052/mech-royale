@@ -4,7 +4,8 @@ Usage: python3 tools/arena_multi.py RUNS "name:BOT_X=1,BOT_Y=2|--sim-option valu
 import re, shlex, subprocess, sys
 from concurrent.futures import ThreadPoolExecutor
 runs, specs = sys.argv[1], sys.argv[2:]
-SEEDS = [3, 5, 7, 9]
+import os
+SEEDS = [int(s) for s in os.environ.get("SEEDS", "3,5,7,9").split(",")]
 def parse(spec):
     name, _, rest = spec.partition(":")
     envs, _, extra = rest.partition("|")

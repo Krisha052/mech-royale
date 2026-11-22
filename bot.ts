@@ -63,7 +63,7 @@ const K = {
   farm: knob("FARM", 1), // in free time, go and shoot drones and ground crates for cubes (arena: 2.17 -> 2.73 kills, cubes at death 3.0 -> 6.1)
   farmUntil: knob("FARM_UNTIL", 420), // match time after which we stop farming, s
   farmRange: knob("FARM_RANGE", 250), // how far we walk for a drone or crate, m
-  farmMinHp: knob("FARM_MIN_HP", 0.6), // arena (4 seeds x 30): 0.85 -> 2.72 kills vs 0.70 -> 2.52 // do not farm below this HP fraction
+  farmMinHp: knob("FARM_MIN_HP", 0.9), // arena (4 seeds x 30): 0.85 -> 2.72 kills vs 0.70 -> 2.52 // do not farm below this HP fraction
   npcStandoff: knob("NPC_STANDOFF", 70), // shoot drones from here (their aggro range is 45 m)
   cubeRange: knob("CUBE_RANGE", 200), // walk this far for a visible cube
   shootNpc: knob("SHOOT_NPC", 1), // shoot drones we happen to pass (when not farming)
@@ -155,9 +155,9 @@ const K = {
   dropMinHp: knob("DROP_MIN_HP", 0), // no drop rush below this HP fraction while an enemy is within 150 m
   dodge: knob("DODGE", 1), // move away from where an incoming mortar shell will land (arena: 0.93 -> 1.23 vs mortar hunters)
   dodgeMargin: knob("DODGE_MARGIN", 2), // extra metres beyond splash + our radius
-  recoverHp: knob("RECOVER_HP", 0), // between fights: below this HP fraction, stay out of sight to regen (0 = off)
-  recoverTo: knob("RECOVER_TO", 0.85), // ... until back above this
-  recoverRange: knob("RECOVER_RANGE", 100), // ... unless an enemy is closer than this (then fight)
+  recoverHp: knob("RECOVER_HP", 0.85), // between fights: below this HP fraction, stay out of sight to regen (0 = off)
+  recoverTo: knob("RECOVER_TO", 0.97), // ... until back above this
+  recoverRange: knob("RECOVER_RANGE", 80), // ... unless an enemy is closer than this (then fight)
   boostFight: knob("BOOST_FIGHT", 40),
   // DIAGNOSTIC: never fire, always back away from threats. Its score = points earned without kills.
   pacifist: knob("PACIFIST", 0),

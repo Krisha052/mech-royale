@@ -73,8 +73,8 @@ const K = {
   exploreUntil: knob("EXPLORE_UNTIL", 240), // stop exploring after this match time, s
   turtleT: knob("TURTLE_T", 100), // before this match time: avoid fights and let the house bots thin each other out (placement scoring)
   turtleR: knob("TURTLE_R", 180), // ... back away from any enemy closer than this
-  turtleCorner: knob("TURTLE_CORNER", 35), // ... unless one is this close (then fight)
-  turtleFireR: knob("TURTLE_FIRE_R", 50), // ... and hold fire unless hit in the last 3 s or an enemy is this close
+  turtleCorner: knob("TURTLE_CORNER", 12), // ... unless one is this close (then fight)
+  turtleFireR: knob("TURTLE_FIRE_R", 25), // ... and hold fire unless hit in the last 3 s or an enemy is this close
   faceS: knob("FACE_S", 0), // after an enemy leaves our 5 s memory, keep the torso toward where it was for this long
   arcW: knob("ARC_W", 0), // target ranking: + this many metres per other enemy that would be behind us while we aim at it
   targetHpW: knob("TARGET_HP_W", 0.05), // target ranking = distance + hp * this (higher: finish wounded ones first)

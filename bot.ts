@@ -111,6 +111,15 @@ const K = {
   cubeFight: knob("CUBE_FIGHT", 200), // real: 3.67 -> 4.10 with 120 m
   cubeMemory: knob("CUBE_MEMORY", 1), // remember cubes we have seen and where our kills died (their cubes drop there) // walk over visible cubes within this many m while fighting (0 = off)
   timing: knob("TIMING", 1), // timing safeguard (do less work when slow); simulations turn it off so CPU load does not change behaviour
+  // Hit from behind by someone we cannot see: turn to face the shot for a moment so the attacker comes
+  // into view (and our front armor faces it). Arena: ~83% of rear damage comes from unseen attackers.
+  rearTurn: knob("REAR_TURN", 1),
+  rearTurnS: knob("REAR_TURN_S", 1.0), // seconds to keep facing the shot
+  // Back to the wall: while fighting, prefer nearby spots from which we can still hit the target but
+  // where buildings block the directions behind us. Arena: most damage from behind comes from unseen
+  // hunters 60-200 m away.
+  backWall: knob("BACK_WALL", 0), // weight of rear cover (0 = off)
+  backWallEvery: knob("BACK_WALL_EVERY", 5), // decisions between spot choices
   dodge: knob("DODGE", 1), // move away from where an incoming mortar shell will land (arena: 0.93 -> 1.23 vs mortar hunters)
   dodgeMargin: knob("DODGE_MARGIN", 2), // extra metres beyond splash + our radius
   recoverHp: knob("RECOVER_HP", 0), // between fights: below this HP fraction, stay out of sight to regen (0 = off)
@@ -149,6 +158,7 @@ run((hello: Hello) => {
   let lastThreat: Threat | null = null
   let scanYaw = 0
   let recovering = false
+  let unseenHit: { bearing: number; until: number } | null = null
   // where cubes are: ones we have seen (they never move) and the spots where our kills died
   const knownCubes = new Map<number, Vec3>()
   const lastSeenAt = new Map<number, Vec3>()
@@ -156,6 +166,8 @@ run((hello: Hello) => {
   let lastNpcHit: { id: number; t: number } | null = null
   let lastHunterSeen = -999
   let coverSpot: P2 | null = null
+  let wallSpot: P2 | null = null
+  let wallTick = -999
   let coverTick = -999
   let fightSpot: P2 | null = null
   let fightSpotTick = -999
@@ -285,6 +297,7 @@ run((hello: Hello) => {
         if (e.type === "damaged" && e.weapon !== "zone" && e.bearing !== null) {
           lastThreat = { bearing: e.bearing, by: e.by, t }
           if (e.by !== null && e.by >= 100 && e.by < 1000) lastNpcHit = { id: e.by, t }
+          if (e.rear && e.by !== null && e.by < 100 && !obs.mechs.some((m) => m.id === e.by)) unseenHit = { bearing: e.bearing, until: t + K.rearTurnS }
           if (e.by !== null && e.by < 100) lastHunterSeen = t
           // their aim has caught up with our current path: change direction now
           if (K.flipOnHit && t > nextStrafeFlip - 1.5) {
@@ -309,10 +322,13 @@ run((hello: Hello) => {
       if (obs.offer) {
         let best = 0
         let bestRank = Infinity
-        const first = ["", "plating", "armor", "nanites"][K.upgMode] ?? ""
-        const base = me.weapons.some((w) => w?.kind === "laser") && K.upgMode === 0 ? LASER_UPGRADE_ORDER : UPGRADE_ORDER
+        const first = ["", "plating", "armor", "nanites", "", "sensors"][K.upgMode] ?? ""
+        const base = me.weapons.some((w) => w?.kind === "laser") ? LASER_UPGRADE_ORDER : UPGRADE_ORDER
         // mode 4: what top-4 finishers chose most in recorded public matches (22 matches)
-        const order = K.upgMode === 4 ? REAL_WINNER_ORDER : first ? [first, ...base.filter((u) => u !== first)] : base
+        // mode 6: sensors second (+15 m all-round sensing: hunters like to sit at ~55 m, just outside 45 m)
+        const order = K.upgMode === 4 ? REAL_WINNER_ORDER
+          : K.upgMode === 6 ? [base[0], "sensors", ...base.slice(1).filter((u) => u !== "sensors")]
+          : first ? [first, ...base.filter((u) => u !== first)] : base
         obs.offer.choices.forEach((c, i) => {
           const r = order.indexOf(c.id)
           const rank = r < 0 ? 99 : r
@@ -569,6 +585,43 @@ run((hello: Hello) => {
             mode = "mortar cover"
           }
         } else coverSpot = null
+        if (K.backWall > 0 && !light && mode !== "mortar cover") {
+          if (!wallSpot || tick - wallTick >= K.backWallEvery * cfg.match.decide_every || d2(pos, wallSpot) < 2) {
+            const tc = center(target!)
+            const toT2 = yawTo(pos, target!.pos)
+            let best: P2 | null = null
+            let bestScore = -Infinity
+            for (let k = 0; k < 12; k++) {
+              const a = (k / 12) * TAU
+              for (const r of [0, 8, 16]) {
+                if (r === 0 && k > 0) continue
+                const c: P2 = [pos[0] + Math.cos(a) * r, pos[1] + Math.sin(a) * r]
+                const [gi, gj] = world.navOf(c[0], c[1])
+                if (!world.walkable(gi, gj) || !insideSafe(c)) continue
+                const gz = world.groundAt(c[0], c[1])
+                const body: Vec3 = [c[0], c[1], gz + 5]
+                if (!world.clear([c[0], c[1], gz + 7], tc, 2)) continue // must still be able to shoot the target
+                let covered = 0
+                for (const off of [-1.05, -0.52, 0, 0.52, 1.05]) {
+                  const ra = toT2 + Math.PI + off
+                  const from: Vec3 = [c[0] + Math.cos(ra) * 120, c[1] + Math.sin(ra) * 120, gz + 8]
+                  if (!world.clear(from, body, 3)) covered++
+                }
+                const score = covered * K.backWall - r * 0.3 - Math.abs(d2(c, target!.pos) - want) * 0.05
+                if (score > bestScore) {
+                  bestScore = score
+                  best = c
+                }
+              }
+            }
+            wallSpot = best
+            wallTick = tick
+          }
+          if (wallSpot && d2(wallSpot, pos) > 1.5) {
+            goal = wallSpot
+            mode = "back to wall"
+          }
+        } else wallSpot = null
         // Unarmed: a laser or mortar on the ground nearby is worth more than strafing in place
         // (arena: about a quarter of runs end with only the gun, the weakest setup by far).
         // cubes lying near us (usually from the kill we just made): grab them while still fighting
@@ -914,6 +967,15 @@ run((hello: Hello) => {
       // reload while nothing to shoot
       if (gun && !shootAt && (gun.ammo ?? 12) < (gun.stats.mag ?? 12) * 0.5 && (gun.reload ?? 0) <= 0) act.reload = true
 
+      // an unseen attacker is shooting our back: look at it (gun holds fire while we turn; a laser charge is kept)
+      if (K.rearTurn > 0 && unseenHit && t < unseenHit.until) {
+        if (obs.mechs.some((m) => m.kind === "mech" && Math.abs(wrap(yawTo(pos, m.pos) - unseenHit!.bearing)) < 0.4)) unseenHit = null
+        else {
+          aimYaw = unseenHit.bearing
+          aimPitch = 0
+          fire[0] = false
+        }
+      }
       act.aim = [wrap(aimYaw), Math.max(cfg.mech.min_pitch, Math.min(cfg.mech.max_pitch, aimPitch))]
       act.fire = K.pacifist > 0 ? [false, false] : fire
 

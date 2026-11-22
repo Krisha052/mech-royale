@@ -130,6 +130,8 @@ class Mech {
   gunDmgMul = 1
   gunCdMul = 1
   upgrades: string[] = []
+  nearBonus = 0 // sensors upgrade: +15 m proximity
+  visionBonus = 0 // sensors upgrade: +25 m vision range
   // hunter brain
   type?: HType
   path: [number, number][] = []
@@ -251,6 +253,17 @@ function damage(target: Mech, shooter: Mech, amount: number, weapon: string, fro
   shooter.lastCombat = t
   target.taken += dmg
   target.takenBy[weapon] = (target.takenBy[weapon] ?? 0) + dmg
+  if (rear) target.takenBy.REAR = (target.takenBy.REAR ?? 0) + dmg
+  if (rear && target.id === 0 && shooter.kind === "mech") {
+    const seen = (ourSeenUntil.get(shooter.id) ?? -1) >= t
+    const key = seen ? "REAR_seen" : "REAR_unseen"
+    target.takenBy[key] = (target.takenBy[key] ?? 0) + dmg
+    if (!seen) {
+      const dd = hyp2(shooter.pos, target.pos)
+      const band = dd < 45 ? "u<45" : dd < 60 ? "u45-60" : dd < 100 ? "u60-100" : dd < 200 ? "u100-200" : "u200+"
+      target.takenBy[band] = (target.takenBy[band] ?? 0) + dmg
+    }
+  }
   shooter.dealt += dmg
   shooter.dealtBy[weapon] = (shooter.dealtBy[weapon] ?? 0) + dmg
   shooter.hits++
@@ -258,11 +271,13 @@ function damage(target: Mech, shooter: Mech, amount: number, weapon: string, fro
   shooter.events.push({ type: "hit", target: target.id, amount: dmg, weapon, rear })
 }
 
+// shared with damage(): which hunters our bot currently sees or remembers (memory_s)
+let ourSeenUntil = new Map<number, number>()
 // ---------- vision (what our bot sees) ----------
 function sees(me: Mech, o: Mech) {
   const d = hyp2(me.pos, o.pos)
-  const near = d <= cfg.vision.near_range
-  const inCone = d <= cfg.vision.range && Math.abs(wrap(Math.atan2(o.pos[1] - me.pos[1], o.pos[0] - me.pos[0]) - me.aim[0])) <= (cfg.vision.fov_deg * Math.PI) / 360
+  const near = d <= cfg.vision.near_range + me.nearBonus
+  const inCone = d <= cfg.vision.range + me.visionBonus && Math.abs(wrap(Math.atan2(o.pos[1] - me.pos[1], o.pos[0] - me.pos[0]) - me.aim[0])) <= (cfg.vision.fov_deg * Math.PI) / 360
   if (!near && !inCone) return false
   const eye = me.eye()
   return world.clear(eye, o.center(), 2) || world.clear(eye, [o.pos[0], o.pos[1], o.pos[2] + M.height], 2)
@@ -559,6 +574,10 @@ async function run(runSeed: number): Promise<Result> {
     else if (id === "laser_charge") A.chargeMul *= 0.75
     else if (id === "gun_damage") A.gunDmgMul *= 1.15
     else if (id === "gun_rate") A.gunCdMul *= 0.87
+    else if (id === "sensors") {
+      A.nearBonus += 15
+      A.visionBonus += 25
+    }
     applyCubes()
     A.events.push({ type: "upgrade", id })
   }
@@ -576,6 +595,7 @@ async function run(runSeed: number): Promise<Result> {
   const bullets: { owner: Mech; p: number[]; v: number[]; trav: number; dmg: number; speed: number; range: number }[] = []
   const shells: { owner: Mech; p: number[]; v: number[]; age: number }[] = []
   const seenUntil = new Map<number, number>()
+  ourSeenUntil = seenUntil
   let t = 0
   let tick = 0
   let slowest = 0

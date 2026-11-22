@@ -72,7 +72,7 @@ const K = {
   explore: knob("EXPLORE", 1), // unarmed and no weapon known: walk to unexplored ground to find one
   exploreUntil: knob("EXPLORE_UNTIL", 240), // stop exploring after this match time, s
   targetHpW: knob("TARGET_HP_W", 0.05), // target ranking = distance + hp * this (higher: finish wounded ones first)
-  upgMode: knob("UPG_MODE", 4), // 0: laser damage first when holding a laser; 1 plating first; 2 armor first; 3 nanites first
+  upgMode: knob("UPG_MODE", 0), // 0: laser damage first when holding a laser; 1 plating first; 2 armor first; 3 nanites first
   // Kite with a laser: hold a long distance (their accuracy falls with range, our led shots do
   // not) and back off firmly, boosting, when they close in. Vision ends at 200 m (+25 with sensors).
   kite: knob("KITE", 0),
@@ -96,7 +96,7 @@ const K = {
   threatCharging: knob("THREAT_CHARGING", 150),
   threatMortar: knob("THREAT_MORTAR", 30),
   // Split the pack: with 2+ enemies around, also move away from their centre while fighting.
-  pack: knob("PACK", 0), // weight of the away-from-centre pull (0 = off)
+  pack: knob("PACK", 1), // weight of the away-from-centre pull (0 = off)
   packRange: knob("PACK_RANGE", 250), // enemies within this count toward the centre
   npcFix: knob("NPC_FIX", 0), // shoot drones that are hurting us at any HP; no drone farming with hunters about
   roofSafe: knob("ROOF_SAFE", 0), // no roof climbing while under fire or below 60% HP

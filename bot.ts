@@ -106,7 +106,8 @@ const K = {
   dropMaxHp: knob("DROP_MAX_HP", 1.01), // only if our HP fraction is below this
   // Collect cubes during fights (killed mechs drop all their cubes + 2; each cube heals ~56 HP and adds
   // 4% damage). Public matches: the winner picks up kill cubes within seconds, mid-fight.
-  cubeFight: knob("CUBE_FIGHT", 120), // walk over visible cubes within this many m while fighting (0 = off)
+  cubeFight: knob("CUBE_FIGHT", 200), // real: 3.67 -> 4.10 with 120 m
+  cubeMemory: knob("CUBE_MEMORY", 1), // remember cubes we have seen and where our kills died (their cubes drop there) // walk over visible cubes within this many m while fighting (0 = off)
   dodge: knob("DODGE", 1), // move away from where an incoming mortar shell will land (arena: 0.93 -> 1.23 vs mortar hunters)
   dodgeMargin: knob("DODGE_MARGIN", 2), // extra metres beyond splash + our radius
   recoverHp: knob("RECOVER_HP", 0), // between fights: below this HP fraction, stay out of sight to regen (0 = off)
@@ -145,6 +146,10 @@ run((hello: Hello) => {
   let lastThreat: Threat | null = null
   let scanYaw = 0
   let recovering = false
+  // where cubes are: ones we have seen (they never move) and the spots where our kills died
+  const knownCubes = new Map<number, Vec3>()
+  const lastSeenAt = new Map<number, Vec3>()
+  let lootSpots: { pos: Vec3; until: number }[] = []
   let lastNpcHit: { id: number; t: number } | null = null
   let lastHunterSeen = -999
   let coverSpot: P2 | null = null
@@ -270,6 +275,10 @@ run((hello: Hello) => {
 
       // ---- events ----
       for (const e of obs.events) {
+        if (e.type === "kill" && K.cubeMemory > 0) {
+          const at = lastSeenAt.get(e.target)
+          if (at) lootSpots.push({ pos: at, until: t + 25 })
+        }
         if (e.type === "damaged" && e.weapon !== "zone" && e.bearing !== null) {
           lastThreat = { bearing: e.bearing, by: e.by, t }
           if (e.by !== null && e.by >= 100 && e.by < 1000) lastNpcHit = { id: e.by, t }
@@ -281,6 +290,17 @@ run((hello: Hello) => {
           }
         }
       }
+
+      // ---- cube memory ----
+      for (const m of obs.mechs) if (m.kind === "mech") lastSeenAt.set(m.id, m.pos)
+      if (K.cubeMemory > 0) {
+        for (const c of obs.cubes) knownCubes.set(c.id, c.pos)
+        const visibleIds = new Set(obs.cubes.map((c) => c.id))
+        for (const [id, c] of knownCubes) if (d2(c, pos) < 3 || (!visibleIds.has(id) && d2(c, pos) < 35)) knownCubes.delete(id)
+        lootSpots = lootSpots.filter((l) => t < l.until && d2(l.pos, pos) > 5)
+      }
+      /** Places with cubes: visible ones, remembered ones and our kill spots. */
+      const cubePlaces = (): Vec3[] => K.cubeMemory > 0 ? [...obs.cubes.map((c) => c.pos), ...knownCubes.values(), ...lootSpots.map((l) => l.pos)] : obs.cubes.map((c) => c.pos)
 
       // ---- upgrades ----
       if (obs.offer) {
@@ -549,9 +569,9 @@ run((hello: Hello) => {
         // (arena: about a quarter of runs end with only the gun, the weakest setup by far).
         // cubes lying near us (usually from the kill we just made): grab them while still fighting
         if (K.cubeFight > 0) {
-          const c = obs.cubes.filter((q) => d2(q.pos, pos) < K.cubeFight && Math.abs(q.pos[2] - pos[2]) < 4).sort((a, b) => d2(a.pos, pos) - d2(b.pos, pos))[0]
+          const c = cubePlaces().filter((q) => d2(q, pos) < K.cubeFight && Math.abs(q[2] - pos[2]) < 4).sort((a, b) => d2(a, pos) - d2(b, pos))[0]
           if (c) {
-            goal = [c.pos[0], c.pos[1]]
+            goal = [c[0], c[1]]
             mode = "fight→cube"
           }
         }
@@ -602,7 +622,7 @@ run((hello: Hello) => {
       } else {
         // free time: loot inside the safe area
         const inReach = (p: number[], r: number) => d2(p, pos) < r && insideSafe(p)
-        const cube = obs.cubes.filter((c) => inReach(c.pos, K.cubeRange)).sort((a, b) => d2(a.pos, pos) - d2(b.pos, pos))[0]
+        const cube = cubePlaces().filter((c) => inReach(c, K.cubeRange)).sort((a, b) => d2(a, pos) - d2(b, pos)).map((c) => ({ pos: c }))[0]
         const want2 = !me.weapons[1]
         // Any remembered weapon better than what we hold. A laser is worth a long walk (duel sim:
         // gun + laser wins 6/6 against gun only), the others less so. Roof pickups count if the

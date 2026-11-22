@@ -40,6 +40,7 @@ const RETALIATE = Number(opt("retaliate", "1")) // 1: non-hunting house bots fig
 const CUBES_A = Number(opt("cubes", "0")) // our starting power cubes: +4% max HP and damage each (up to 10)
 const DROPS = !argv.includes("--no-drops") // supply drops: stand in the ring alone for capture_s -> cubes + full repair
 const HUNTER_JUMP = Number(opt("hunter-jump", "0")) // chance per decision that a strafing hunter hops (jump + short jet)
+const HUNTER_CUBES = Number(opt("hunter-cubes", "0")) // hunters carry ~t/this cubes (+0-2) when they arrive, up to 10 (0 = none)
 const SHOW_BULLETS = !argv.includes("--no-bullets") // visible enemy gun bullets in obs.projectiles, as the real server sends
 const FARM = !argv.includes("--no-farm") // drones, crates, power cubes and upgrade offers
 const PICKUPS = !argv.includes("--no-pickups") // floor weapons and hunter death drops (protocol §7 Weapon loot)
@@ -616,6 +617,12 @@ async function run(runSeed: number): Promise<Result> {
     const alive = hunters.filter((h) => h.hp > 0)
     const cap = Math.min(MAXACTIVE, 1 + Math.floor(kills / 2) + (t > 200 ? 1 : 0))
     if (!FULL && alive.length < cap && sent < TYPES.length && t - lastSpawn > 4) {
+      const giveCubes = (h: Mech) => {
+        if (HUNTER_CUBES <= 0) return
+        h.cubes = Math.min(10, Math.floor(t / HUNTER_CUBES + rand() * 2))
+        h.hp = h.maxHp = M.hp * (1 + cfg.cubes.hp_per_cube * h.cubes)
+        h.dmgMult = 1 + cfg.cubes.damage_per_cube * h.cubes
+      }
       const [hx, hy] = pick(A.pos[0], A.pos[1], 160, 230)
       const h = new Mech(1 + sent, hx, hy, HUNTER_WEAPON as Weapon2)
       h.type = TYPES[sent]
@@ -629,6 +636,7 @@ async function run(runSeed: number): Promise<Result> {
           }
         }
       } else if (!HUNTER_WEAPON && rand() < HUNTER_MORTAR) h.second = "mortar"
+      giveCubes(h)
       hunters.push(h)
       sent++
       lastSpawn = t
@@ -903,7 +911,7 @@ async function run(runSeed: number): Promise<Result> {
       if (h.hp <= 0 && !(h as any).counted) {
         ;(h as any).counted = true
         if (PICKUPS && h.second) pickups.push({ id: pickupId++, kind: h.second, pos: [...h.pos] })
-        if (FARM) dropCubes(h.pos, cfg.cubes.death_drop_extra)
+        if (FARM) dropCubes(h.pos, cfg.cubes.death_drop_extra + h.cubes)
         if (!h.killedByZone) kills++
         A.events.push({ type: "kill", target: h.id })
         if (VERBOSE) console.log(`  t=${t.toFixed(1)} killed ${h.type!.name} #${h.id}; A hp ${A.hp.toFixed(0)}`)

@@ -31,7 +31,9 @@ const REAL_WINNER_ORDER = ["armor", "nanites", "plating", "gun_damage", "gun_rat
   ...UPGRADE_ORDER.filter((u) => !["armor", "nanites", "plating", "gun_damage", "gun_rate", "gun_mag", "laser_damage", "laser_charge", "servos"].includes(u))]
 // Weapon preference for the second slot.
 // Real-map arena sim (30 runs, kills before death): laser 4.13, mortar 3.30, lightning 1.75, none 1.6.
-const WEAPON_RANK: Record<string, number> = { laser: 3, mortar: 2, lightning: 1, gun: 0 }
+const LIGHT_RANK = Number(process.env.BOT_LIGHT_RANK ?? 1) // 4: prefer lightning over every other second weapon
+const WEAPON_RANK: Record<string, number> = { laser: 3, mortar: 2, lightning: LIGHT_RANK, gun: 0 }
+const LIGHTNING_UPGRADE_ORDER = ["plating", "armor", "lightning_range", "lightning_efficiency", "nanites", "gun_damage", "gun_rate", "lightning_chain"]
 
 type Threat = { bearing: number; by: number | null; t: number }
 
@@ -47,7 +49,7 @@ const K = {
   want: knob("WANT", 75), // preferred fight distance with the gun alone, m
   band: knob("BAND", 30), // no radial movement within want +- band
   wantLaser: knob("WANT_LASER", 110), // ... when holding a laser (hitscan, 280 m)
-  wantLightning: knob("WANT_LIGHTNING", 140), // ... with lightning (45 m reach): fight like the gun; closing in loses in both sims
+  wantLightning: knob("WANT_LIGHTNING", 30), // ... with lightning (45 m reach): fight like the gun; closing in loses in both sims
   bandLightning: knob("BAND_LIGHTNING", 8),
   wantMortar: knob("WANT_MORTAR", 100), // ... with a mortar (lobbed; splash hurts us up close)
   radial: knob("RADIAL", 0.8), // weight of closing/opening distance vs sideways
@@ -386,7 +388,9 @@ run((hello: Hello) => {
         let best = 0
         let bestRank = Infinity
         const first = ["", "plating", "armor", "nanites", "", "sensors"][K.upgMode] ?? ""
-        const base = me.weapons.some((w) => w?.kind === "laser") ? LASER_UPGRADE_ORDER : UPGRADE_ORDER
+        const base = me.weapons.some((w) => w?.kind === "laser") ? LASER_UPGRADE_ORDER
+          : LIGHT_RANK >= 3 && me.weapons.some((w) => w?.kind === "lightning") ? [...LIGHTNING_UPGRADE_ORDER, ...UPGRADE_ORDER.filter((u) => !LIGHTNING_UPGRADE_ORDER.includes(u))]
+          : UPGRADE_ORDER
         // mode 4: what top-4 finishers chose most in recorded public matches (22 matches)
         // mode 6: sensors second (+15 m all-round sensing: hunters like to sit at ~55 m, just outside 45 m)
         // mode 7: laser_charge first when holding a laser (the strongest team bot's favourite pick)
@@ -426,7 +430,7 @@ run((hello: Hello) => {
 
       // mark the squares around us as looked over (vision reaches far, but buildings hide a lot)
       for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) seenCells.add(cellKey(pos[0] + dx * SEEN_CELL, pos[1] + dy * SEEN_CELL))
-      const armed = me.weapons[1]?.kind === "laser" || me.weapons[1]?.kind === "mortar"
+      const armed = me.weapons[1]?.kind === "laser" || me.weapons[1]?.kind === "mortar" || (LIGHT_RANK >= 3 && me.weapons[1]?.kind === "lightning")
 
       // ---- what we see ----
       const mechs = obs.mechs.filter((m) => m.kind === "mech")
@@ -778,7 +782,7 @@ run((hello: Hello) => {
         if (K.grabInFight > 0 && !armed) {
           let near: { id: number; kind: string; pos: Vec3 } | undefined
           for (const [id, w] of knownPickups) {
-            if ((w.kind !== "laser" && w.kind !== "mortar") || w.pos[2] > world.groundAt(w.pos[0], w.pos[1]) + 3) continue
+            if ((w.kind !== "laser" && w.kind !== "mortar" && !(LIGHT_RANK >= 3 && w.kind === "lightning")) || w.pos[2] > world.groundAt(w.pos[0], w.pos[1]) + 3) continue
             if (d2(w.pos, pos) < K.grabInFight && (!near || d2(w.pos, pos) < d2(near.pos, pos))) near = { id, ...w }
           }
           if (near) {
@@ -827,7 +831,7 @@ run((hello: Hello) => {
         // Any remembered weapon better than what we hold. A laser is worth a long walk (duel sim:
         // gun + laser wins 6/6 against gun only), the others less so. Roof pickups count if the
         // roof is low enough to climb (jump, then jet) and we have not failed to reach it before.
-        const reachKm = (kind: string) => (kind === "laser" ? 250 : 100)
+        const reachKm = (kind: string) => (kind === "laser" || (LIGHT_RANK >= 3 && kind === "lightning") ? 250 : 100)
         let pick: { id: number; kind: string; pos: Vec3 } | undefined
         let pickCost = Infinity
         for (const [id, p] of knownPickups) {
@@ -842,7 +846,7 @@ run((hello: Hello) => {
           if (dist > reachKm(p.kind) || (!insideSafe(p.pos) && slack - detour < 20) || (dist > 80 && slack < 25)) continue
           // metres of walking each kind is worth: house bots grab weapons within seconds, and in the
           // arena sim a mortar is nearly as good as a laser, so take whichever of the two is closer
-          const cost = dist - (p.kind === "laser" ? 150 : p.kind === "mortar" ? 120 : 10)
+          const cost = dist - (LIGHT_RANK >= 3 && p.kind === "lightning" ? 160 : p.kind === "laser" ? 150 : p.kind === "mortar" ? 120 : 10)
           if (cost < pickCost) {
             pickCost = cost
             pick = { id, ...p }

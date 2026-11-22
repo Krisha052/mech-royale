@@ -71,6 +71,11 @@ const K = {
   grabInFight: knob("GRAB_IN_FIGHT", 80), // unarmed in a fight: move to a known laser/mortar within this many m (0 = off). Arena: armed 63% -> 92% of runs, kills 2.21 -> 2.60
   explore: knob("EXPLORE", 1), // unarmed and no weapon known: walk to unexplored ground to find one
   exploreUntil: knob("EXPLORE_UNTIL", 240), // stop exploring after this match time, s
+  perch: knob("PERCH", 1), // no fight: climb onto a flat roof inside the next zone circle and hold there (ground bots can't see the middle of a roof)
+  perchMinH: knob("PERCH_MIN_H", 12), // roof height above the ground, m
+  perchMaxH: knob("PERCH_MAX_H", 40),
+  perchEdge: knob("PERCH_EDGE", 7), // stand at least this far from every roof edge
+  perchFrom: knob("PERCH_FROM", 0), // match time to start, s
   faceS: knob("FACE_S", 0), // after an enemy leaves our 5 s memory, keep the torso toward where it was for this long
   arcW: knob("ARC_W", 0), // target ranking: + this many metres per other enemy that would be behind us while we aim at it
   targetHpW: knob("TARGET_HP_W", 0.05), // target ranking = distance + hp * this (higher: finish wounded ones first)
@@ -168,12 +173,36 @@ run((hello: Hello) => {
   const cfg = hello.config
   const t0 = performance.now()
   const world = new World(hello.map.dir)
+  // flat roof spots (every 5 m), at least perchEdge from any edge, for perching
+  const roofSpots: { id: number; pos: Vec3 }[] = []
+  if (K.perch > 0) {
+    const topAt = (x: number, y: number) => {
+      const k = world.cell(x, y)
+      if (k < 0) return NaN
+      const a = world.t1[k], b = world.t2[k]
+      return Number.isNaN(a) ? NaN : Number.isNaN(b) ? a : Math.max(a, b)
+    }
+    for (let x = world.minX + 10; x < world.minX + world.nx - 10; x += 5)
+      for (let y = world.minY + 10; y < world.minY + world.ny - 10; y += 5) {
+        const top = topAt(x, y)
+        if (!Number.isFinite(top)) continue
+        const h = top - world.groundAt(x, y)
+        if (h < K.perchMinH || h > K.perchMaxH) continue
+        let flat = true
+        for (let k = 0; k < 8 && flat; k++) {
+          const a = (k / 8) * Math.PI * 2
+          const q = topAt(x + Math.cos(a) * K.perchEdge, y + Math.sin(a) * K.perchEdge)
+          if (!(Math.abs(q - top) < 0.8)) flat = false
+        }
+        if (flat) roofSpots.push({ id: -100 - roofSpots.length, pos: [x, y, top] })
+      }
+  }
   // Warm up the JIT on the hot paths now (hello allows 20 s), so the first decisions are not late.
   for (let i = 0; i < 30; i++) {
     world.path(-200 + i * 7, -100, 150, 120 - i * 5, 20000)
     world.clear([0, 0, 5], [150 - i, 90, 12], 1.5)
   }
-  log(`map loaded and warmed up in ${(performance.now() - t0).toFixed(0)} ms`)
+  log(`map loaded and warmed up in ${(performance.now() - t0).toFixed(0)} ms; ${roofSpots.length} roof spots`)
 
   let rng = hello.seed >>> 0 || 1
   const rand = () => ((rng = (Math.imul(rng, 1664525) + 1013904223) >>> 0) / 4294967296)
@@ -224,6 +253,7 @@ run((hello: Hello) => {
   const cellKey = (x: number, y: number) => `${Math.floor(x / SEEN_CELL)},${Math.floor(y / SEEN_CELL)}`
   // roof pickups we failed to reach: not retried
   const skipPickup = new Set<number>()
+  let perchSpot: { id: number; pos: Vec3 } | null = null
   let climbFor: { id: number; since: number } | null = null
   // Timing safeguard: a late answer drops that decision's shots (protocol §2). The observation
   // tick jumps by more than decide_every when we missed answers; then do less work for a while.
@@ -556,6 +586,19 @@ run((hello: Hello) => {
       const retreat = (threatened || recover) && (K.pacifist > 0 || recover || (K.ttk > 0 ? losingTrade : (hpFrac < K.retreatHp && targetFrac >= hpFrac) || near.length >= K.retreatN))
       const safeR = obs.zone.next_radius * 0.6
       const insideSafe = (p: number[]) => d2(p, obs.zone.next_center) <= Math.max(safeR, 15)
+      // perch: keep the current roof spot while it stays well inside the next circle; else the nearest good one
+      if (K.perch > 0) {
+        const ok = (q: { id: number; pos: Vec3 }) => !skipPickup.has(q.id) && d2(q.pos, obs.zone.next_center) < obs.zone.next_radius - 12 && d2(q.pos, obs.zone.center) < obs.zone.radius - 12
+        if (perchSpot && !ok(perchSpot)) perchSpot = null
+        if (!perchSpot && (tick % 10 === 0)) {
+          let bestD = Infinity
+          for (const q of roofSpots) {
+            if (!ok(q)) continue
+            const d = d2(q.pos, pos)
+            if (d < bestD) { bestD = d; perchSpot = q }
+          }
+        }
+      }
 
       // a supply drop worth rushing: landing soon, close enough, nobody else capturing it
       const enemyClose = obs.mechs.some((m) => m.kind === "mech" && d2(m.pos, pos) < 150)
@@ -860,6 +903,10 @@ run((hello: Hello) => {
             act.take = pick.id
             if (!want2) act.drop = 1
           }
+        } else if (K.perch > 0 && t >= K.perchFrom && perchSpot) {
+          goingFor = { id: perchSpot.id, kind: "perch", pos: perchSpot.pos }
+          goal = [perchSpot.pos[0], perchSpot.pos[1]]
+          mode = "perch"
         } else if (K.explore > 0 && !armed && t < K.exploreUntil && !farmTarget(inReach) && exploreTarget(insideSafe)) {
           goal = exploreTarget(insideSafe)!
           mode = "explore"
@@ -933,6 +980,18 @@ run((hello: Hello) => {
           }
         }
       } else if (climbFor && !goingFor) climbFor = null
+
+      // ---- perched: stay on the roof, near the spot (fight from up here; never walk off the edge) ----
+      if (K.perch > 0 && perchSpot && !urgent && pos[2] >= perchSpot.pos[2] - 1 && d2(pos, perchSpot.pos) < 25) {
+        const dh = d2(pos, perchSpot.pos)
+        if (dh > 4) {
+          const a = yawTo(pos, perchSpot.pos)
+          act.move = [Math.cos(a), Math.sin(a)]
+        } else if (mode === "perch" || mode === "perched") act.move = [0, 0] // quiet when nothing is going on; strafe and dodge in a fight
+        act.boost = false
+        act.jump = false
+        if (mode !== "fight") mode = "perched"
+      }
 
       // ---- laser counter-play: hide from a beam that is about to be fired at us ----
       if (K.laserDodge > 0 && !light) {
